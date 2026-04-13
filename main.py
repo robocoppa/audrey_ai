@@ -47,10 +47,17 @@ TOOL_SERVER_URLS: List[str] = _config.get("tool_servers", [])
 
 # ── Env knobs ────────────────────────────────────────────────────────────────
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-ROUTER_MODEL = os.getenv("ROUTER_MODEL", "qwen2.5:1.5b")
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ FIX 2: Router model changed from qwen2.5:1.5b → qwen3:4b              │
+# └─────────────────────────────────────────────────────────────────────────┘
+ROUTER_MODEL = os.getenv("ROUTER_MODEL", "qwen3:4b")
 DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.2"))
 LOW_CONFIDENCE_THRESHOLD = float(os.getenv("LOW_CONFIDENCE_THRESHOLD", "0.60"))
 MAX_DEEP_WORKERS = int(os.getenv("MAX_DEEP_WORKERS", "2"))
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ FIX 1: Cloud worker cap — separate from local MAX_DEEP_WORKERS         │
+# └─────────────────────────────────────────────────────────────────────────┘
+MAX_DEEP_WORKERS_CLOUD = int(os.getenv("MAX_DEEP_WORKERS_CLOUD", "3"))
 EMIT_ROUTING_BANNER = os.getenv("EMIT_ROUTING_BANNER", "true").lower() == "true"
 GPU_CONCURRENCY = int(os.getenv("GPU_CONCURRENCY", "1"))
 EMIT_STATUS_UPDATES = os.getenv("EMIT_STATUS_UPDATES", "true").lower() == "true"
@@ -71,7 +78,7 @@ FAST_PATH_CONFIDENCE = FAST_PATH_CONFIG.get("confidence_threshold", 0.88)
 FAST_PATH_TOOL_MODELS = set(FAST_PATH_CONFIG.get("tool_capable_models", []))
 FAST_PATH_TIMEOUT = int(TIMEOUTS.get("fast_path", 180))
 
-# ── Agentic config (NEW) ────────────────────────────────────────────────────
+# ── Agentic config ───────────────────────────────────────────────────────────
 REACT_MAX_ROUNDS = int(os.getenv("REACT_MAX_ROUNDS", "3"))
 REFLECTION_ENABLED = os.getenv("REFLECTION_ENABLED", "true").lower() == "true"
 PLANNING_ENABLED = os.getenv("PLANNING_ENABLED", "true").lower() == "true"
@@ -273,57 +280,104 @@ def get_last_user_text(msgs) -> str:
     return ""
 
 
-# ── Keyword pre-filter ───────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  FIX 3: Expanded keyword pre-filters
+#  - More code patterns (languages, frameworks, error types)
+#  - More reasoning patterns (analysis, comparison, explanation)
+#  - New "general" quick-match for simple conversational queries
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Strong code signals — high confidence, bypass router entirely
 _CS = [
     re.compile(r"```"),
     re.compile(r"\b(traceback|stacktrace|segfault|stderr)\b", re.I),
+    re.compile(r"(?:^|\n)\s*(?:import |from \S+ import |#include |using namespace )", re.M),
+    re.compile(r"\b(TypeError|ValueError|KeyError|IndexError|AttributeError|NameError|SyntaxError|RuntimeError|NullPointerException|SegmentationFault)\b"),
+    re.compile(r"(?:^|\n)\s*(?:fn |func |def |class |struct |enum |impl |pub fn |async fn )", re.M),
 ]
+
+# Weak code signals — need 2+ matches for confidence
 _CW = [
     re.compile(r"(?:^|\n)\s*(?:def |class |from \S+ import )", re.M),
     re.compile(
-        r"(fix|debug|refactor|implement|write)\s.{0,20}(code|function|script|bug|error)",
+        r"(fix|debug|refactor|implement|write|build|create|optimize)\s.{0,20}(code|function|script|bug|error|program|app|module|class|method)",
         re.I,
     ),
-    re.compile(r"\b(syntax error|compile|runtime error)\b", re.I),
+    re.compile(r"\b(syntax error|compile|runtime error|type error|null pointer|segfault)\b", re.I),
     re.compile(
-        r"\b(API|endpoint|REST|GraphQL|SQL)\b.{0,20}(code|implement|write|create|build)",
+        r"\b(API|endpoint|REST|GraphQL|SQL|database|query|schema)\b.{0,20}(code|implement|write|create|build|design|optimize)",
         re.I,
     ),
+    re.compile(r"\b(python|javascript|typescript|rust|go|java|c\+\+|ruby|swift|kotlin|bash|shell|sql|html|css)\b.{0,30}(code|script|function|program|implement|write|fix|error|bug)", re.I),
+    re.compile(r"\b(docker|kubernetes|nginx|terraform|ansible|git|webpack|npm|pip|cargo)\b.{0,20}(config|setup|error|fix|issue|problem)", re.I),
+    re.compile(r"\b(regex|regexp|regular expression|pattern match)\b", re.I),
+    re.compile(r"\b(algorithm|data structure|linked list|binary tree|hash map|sorting|recursion)\b.{0,20}(implement|write|code|build)", re.I),
 ]
+
+# Reasoning patterns
 _RP = [
     re.compile(
-        r"(explain|prove|derive|compare|analyze|evaluate)\s.{0,30}(why|how|whether|if)",
+        r"(explain|prove|derive|compare|analyze|evaluate|assess|critique|argue)\s.{0,30}(why|how|whether|if|the|between|difference)",
         re.I,
     ),
     re.compile(r"step[- ]by[- ]step", re.I),
-    re.compile(r"\b(proof|theorem|hypothesis|tradeoff|pros and cons)\b", re.I),
+    re.compile(r"\b(proof|theorem|hypothesis|tradeoff|pros and cons|advantages|disadvantages)\b", re.I),
+    re.compile(r"\b(compare|contrast|versus|vs\.?|difference between)\b.{0,40}\b(and|or|vs)\b", re.I),
+    re.compile(r"\b(what are the|list the|outline the)\b.{0,20}\b(implications|consequences|factors|considerations|tradeoffs|risks|benefits)\b", re.I),
+    re.compile(r"\b(why does|why is|why are|why do|how does|how do|how is|how are)\b.{10,}", re.I),
+    re.compile(r"\b(analyze|evaluate|assess|review|examine|investigate)\b.{0,30}\b(impact|effect|result|outcome|performance|approach|strategy|method)\b", re.I),
+    re.compile(r"\b(should I|which is better|what's the best|recommend)\b.{0,30}\b(approach|method|strategy|framework|tool|language|option)\b", re.I),
+]
+
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ FIX 3: New — general/simple patterns for fast bypass                   │
+# │ These catch simple conversational queries that don't need the router.  │
+# └─────────────────────────────────────────────────────────────────────────┘
+_GP = [
+    re.compile(r"^(hi|hello|hey|good morning|good afternoon|good evening|howdy|sup|yo)\b[!?.]*$", re.I),
+    re.compile(r"^(thanks|thank you|thx|ty|cheers|got it|ok|okay|cool|great|perfect|nice)\b[!?.]*$", re.I),
+    re.compile(r"^(what is|what's|define|tell me about|who is|who was)\s+\w+", re.I),
+    re.compile(r"^(translate|summarize|summarise|paraphrase|rewrite|rephrase)\b", re.I),
 ]
 
 
 def keyword_prefilter(text):
+    """Expanded keyword pre-filter — catches more patterns to reduce router calls."""
+    # Strong code signals
     for p in _CS:
         if p.search(text):
             return {
                 "task_type": "code",
                 "confidence": 0.92,
                 "needs_vision": False,
-                "route_reason": f"Keyword (strong): {p.pattern!r}",
+                "route_reason": f"Keyword (strong code): {p.pattern[:60]}",
             }
+    # Weak code signals (need 2+)
     w = [p for p in _CW if p.search(text)]
     if len(w) >= 2:
         return {
             "task_type": "code",
             "confidence": 0.85,
             "needs_vision": False,
-            "route_reason": "Keyword (weak x2)",
+            "route_reason": f"Keyword (weak code x{len(w)})",
         }
+    # Reasoning patterns
     for p in _RP:
         if p.search(text):
             return {
                 "task_type": "reasoning",
                 "confidence": 0.80,
                 "needs_vision": False,
-                "route_reason": f"Keyword: {p.pattern!r}",
+                "route_reason": f"Keyword (reasoning): {p.pattern[:60]}",
+            }
+    # General/simple patterns — high confidence so fast path can handle them
+    for p in _GP:
+        if p.search(text):
+            return {
+                "task_type": "general",
+                "confidence": 0.95,
+                "needs_vision": False,
+                "route_reason": f"Keyword (general): {p.pattern[:60]}",
             }
     return None
 
@@ -582,10 +636,58 @@ async def ollama_chat_stream(
                 yield i
 
 
-# ── Router classification ───────────────────────────────────────────────────
-_ROUTER_SYSTEM = """You are a request router. Classify into: code, reasoning, vl, general.
-Return ONLY strict JSON: {"task_type": "...", "confidence": 0.0, "needs_vision": false, "route_reason": "..."}
-No markdown fences, no explanation, no preamble. Just the JSON object."""
+# ══════════════════════════════════════════════════════════════════════════════
+#  FIX 2: Improved router classification
+#  - Better system prompt with few-shot examples
+#  - Explicit /no_think instruction for qwen3 (disables chain-of-thought)
+#  - FIX 4: Smarter fallback on parse failure
+# ══════════════════════════════════════════════════════════════════════════════
+
+_ROUTER_SYSTEM = """You are a request classifier. Your ONLY job is to output a JSON object.
+Do NOT explain, do NOT add markdown fences, do NOT think out loud.
+
+Classify the user request into exactly one of these types:
+- "code" — writing, debugging, reviewing, or explaining code; technical implementation
+- "reasoning" — analysis, comparison, math, logic, step-by-step problem solving, strategy
+- "vl" — the request includes or asks about an image
+- "general" — conversation, factual questions, creative writing, translation, summaries
+
+Output ONLY this JSON (nothing else before or after):
+{"task_type": "...", "confidence": 0.XX, "needs_vision": false, "route_reason": "one short phrase"}
+
+Confidence guide:
+- 0.95 = obviously this type, no ambiguity
+- 0.85 = clearly this type with minor ambiguity
+- 0.70 = likely this type but could be another
+- 0.50 = genuinely uncertain
+
+Examples:
+
+User: "Write a Python function to merge two sorted lists"
+{"task_type": "code", "confidence": 0.95, "needs_vision": false, "route_reason": "Python implementation request"}
+
+User: "Compare the pros and cons of microservices vs monolith architecture"
+{"task_type": "reasoning", "confidence": 0.90, "needs_vision": false, "route_reason": "Architecture comparison/analysis"}
+
+User: "What's in this image?"
+{"task_type": "vl", "confidence": 0.95, "needs_vision": true, "route_reason": "Image analysis request"}
+
+User: "Tell me about the history of jazz music"
+{"task_type": "general", "confidence": 0.92, "needs_vision": false, "route_reason": "Factual/historical question"}
+
+User: "Debug this error: TypeError: cannot unpack non-sequence NoneType"
+{"task_type": "code", "confidence": 0.95, "needs_vision": false, "route_reason": "Debug Python TypeError"}
+
+User: "Should I use React or Vue for my next project? What are the tradeoffs?"
+{"task_type": "reasoning", "confidence": 0.85, "needs_vision": false, "route_reason": "Framework comparison with tradeoffs"}
+
+User: "Write me a poem about autumn"
+{"task_type": "general", "confidence": 0.92, "needs_vision": false, "route_reason": "Creative writing request"}
+
+User: "Explain why quicksort has O(n log n) average case complexity"
+{"task_type": "reasoning", "confidence": 0.88, "needs_vision": false, "route_reason": "Algorithm complexity analysis"}
+
+Now classify the following request. Output ONLY the JSON object:"""
 
 
 def _extract_json(raw: str) -> Optional[dict]:
@@ -639,6 +741,77 @@ def _extract_json(raw: str) -> Optional[dict]:
     return None
 
 
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ FIX 4: Keyword-based fallback classification                           │
+# │ When the router model fails to produce valid JSON, instead of          │
+# │ defaulting to general@0.45, use keyword heuristics to at least get     │
+# │ the task_type right. Also retry once before giving up.                 │
+# └─────────────────────────────────────────────────────────────────────────┘
+
+def _keyword_fallback_classify(text: str) -> Dict[str, Any]:
+    """Last-resort classification using simple keyword counts.
+
+    Used when the router model fails to produce valid JSON.
+    Returns a classification dict with moderate confidence — enough to
+    pick the right worker pool but not enough to trigger fast path.
+    """
+    text_lower = text.lower()
+
+    # Count keyword hits per category
+    code_score = 0
+    reasoning_score = 0
+
+    # Code indicators
+    code_words = [
+        "code", "function", "bug", "error", "debug", "implement", "script",
+        "python", "javascript", "rust", "java", "api", "endpoint", "database",
+        "sql", "html", "css", "docker", "git", "compile", "syntax", "variable",
+        "class", "method", "library", "package", "framework", "deploy", "server",
+        "regex", "algorithm", "array", "string", "loop", "recursion",
+    ]
+    for w in code_words:
+        if w in text_lower:
+            code_score += 1
+
+    # Check for code blocks or import statements
+    if "```" in text or re.search(r"(?:import |from \S+ import |#include )", text):
+        code_score += 5
+
+    # Reasoning indicators
+    reasoning_words = [
+        "explain", "why", "compare", "analyze", "evaluate", "tradeoff",
+        "pros and cons", "difference", "versus", "better", "worse",
+        "advantage", "disadvantage", "implication", "consequence",
+        "strategy", "approach", "reasoning", "logic", "proof", "theorem",
+        "step by step", "argue", "critique", "assess",
+    ]
+    for w in reasoning_words:
+        if w in text_lower:
+            reasoning_score += 1
+
+    if code_score >= 3 or (code_score >= 2 and reasoning_score == 0):
+        return {
+            "task_type": "code",
+            "confidence": 0.70,
+            "needs_vision": False,
+            "route_reason": f"Keyword fallback (code score={code_score})",
+        }
+    if reasoning_score >= 2 or (reasoning_score >= 1 and code_score == 0 and len(text) > 100):
+        return {
+            "task_type": "reasoning",
+            "confidence": 0.65,
+            "needs_vision": False,
+            "route_reason": f"Keyword fallback (reasoning score={reasoning_score})",
+        }
+
+    return {
+        "task_type": "general",
+        "confidence": 0.60,
+        "needs_vision": False,
+        "route_reason": f"Keyword fallback (code={code_score}, reasoning={reasoning_score})",
+    }
+
+
 async def classify_request(msgs):
     if has_vision_content(msgs):
         return {
@@ -651,39 +824,56 @@ async def classify_request(msgs):
     kw = keyword_prefilter(flat)
     if kw:
         return kw
-    rp = [{"role": "system", "content": _ROUTER_SYSTEM}, {"role": "user", "content": flat}]
-    raw = (
-        await ollama_chat_once(
-            ROUTER_MODEL,
-            rp,
-            temperature=0.0,
-            max_tokens=120,
-            top_p=0.9,
-            stop=None,
-            request_timeout=timeout_for_model(ROUTER_MODEL, is_router=True),
-        )
-    )["message"]["content"]
 
-    p = _extract_json(raw)
-    if p:
-        tt = p.get("task_type", "general")
-        if tt not in {"code", "reasoning", "vl", "general"}:
-            tt = "general"
-        return {
-            "task_type": tt,
-            "confidence": max(0.0, min(float(p.get("confidence", 0.5)), 1.0)),
-            "needs_vision": bool(p.get("needs_vision", False)),
-            "route_reason": str(p.get("route_reason", "router")),
-        }
+    # ── Router model classification ──
+    rp = [
+        {"role": "system", "content": _ROUTER_SYSTEM},
+        {"role": "user", "content": flat},
+    ]
 
-    # Parse failed — log the raw output so you can diagnose
-    logger.warning("Router parse failure. Raw output: %s", raw[:300])
-    return {
-        "task_type": "general",
-        "confidence": 0.75,
-        "needs_vision": False,
-        "route_reason": f"Router parse failure (raw: {raw[:80]})",
-    }
+    # FIX 4: Try up to 2 times before falling back to keyword heuristics
+    for attempt in range(2):
+        try:
+            raw = (
+                await ollama_chat_once(
+                    ROUTER_MODEL,
+                    rp,
+                    temperature=0.0,
+                    max_tokens=120,
+                    top_p=0.9,
+                    stop=None,
+                    request_timeout=timeout_for_model(ROUTER_MODEL, is_router=True),
+                )
+            )["message"]["content"]
+
+            p = _extract_json(raw)
+            if p:
+                tt = p.get("task_type", "general")
+                if tt not in {"code", "reasoning", "vl", "general"}:
+                    tt = "general"
+                return {
+                    "task_type": tt,
+                    "confidence": max(0.0, min(float(p.get("confidence", 0.5)), 1.0)),
+                    "needs_vision": bool(p.get("needs_vision", False)),
+                    "route_reason": str(p.get("route_reason", "router")),
+                }
+
+            # Parse failed — log and retry (or fall through)
+            logger.warning(
+                "Router parse failure (attempt %d). Raw: %s", attempt + 1, raw[:300]
+            )
+
+        except Exception as e:
+            logger.warning("Router call failed (attempt %d): %s", attempt + 1, e)
+
+    # ── FIX 4: Both attempts failed — use keyword fallback instead of blind default ──
+    user_text = get_last_user_text(msgs)
+    fallback = _keyword_fallback_classify(user_text or flat)
+    logger.info(
+        "Router exhausted — keyword fallback: type=%s conf=%.2f reason=%s",
+        fallback["task_type"], fallback["confidence"], fallback["route_reason"],
+    )
+    return fallback
 
 
 # ── Model selection (uses MODEL_REGISTRY for fast path) ─────────────────────
@@ -766,10 +956,7 @@ async def run_model_with_tools(
     frequency_penalty=None,
     presence_penalty=None,
 ):
-    """Run a model with tool-calling support via the tool registry.
-
-    If tools are disabled or no tools are discovered, falls back to plain generation.
-    """
+    """Run a model with tool-calling support via the tool registry."""
     if not TOOLS_ENABLED or not _tool_registry or not _tool_registry.has_tools:
         return await run_model_once(
             model,
@@ -802,7 +989,7 @@ async def run_model_with_tools(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IMPROVEMENT 2: Planning node — decomposes complex queries for deep workers
+#  Planning node — decomposes complex queries for deep workers
 # ══════════════════════════════════════════════════════════════════════════════
 
 _PLANNER_SYSTEM = """You are a task planner. Given a user request, decide if it should be
@@ -823,8 +1010,6 @@ async def plan_sub_tasks(msgs: List[Dict[str, Any]], task_type: str) -> Optional
     if not PLANNING_ENABLED:
         return None
 
-    # Check complexity based on the USER message, not the full conversation
-    # (which includes injected datetime system messages that inflate the count)
     user_text = get_last_user_text(msgs)
     if estimate_tokens(user_text) < PLANNING_MIN_TOKENS:
         return None
@@ -854,7 +1039,7 @@ async def plan_sub_tasks(msgs: List[Dict[str, Any]], task_type: str) -> Optional
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IMPROVEMENT 3: Reflection gate — checks response completeness
+#  Reflection gate — checks response completeness
 # ══════════════════════════════════════════════════════════════════════════════
 
 _REFLECT_SYSTEM = """You are a response quality checker. Given the original question and a
@@ -974,7 +1159,7 @@ class OrchestratorState(TypedDict, total=False):
     # Fast-path fields
     use_fast_path: bool
     fast_model: str
-    # Agentic fields (NEW)
+    # Agentic fields
     sub_tasks: Optional[List[str]]
     react_rounds: int
     reflection_result: Dict[str, Any]
@@ -1053,7 +1238,7 @@ async def web_search_node(s):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IMPROVEMENT 1: ReAct agent loop for fast path
+#  ReAct agent loop for fast path
 # ══════════════════════════════════════════════════════════════════════════════
 
 _REACT_SYSTEM = """You are a helpful AI assistant with access to tools. Think step by step.
@@ -1070,15 +1255,7 @@ Be thorough but efficient — use tools only when they add value."""
 
 
 async def node_react_agent(s):
-    """IMPROVEMENT 1: ReAct loop — think, act, observe, repeat.
-
-    Replaces the old node_fast_generate with an iterative agent that can:
-    - Decide dynamically whether to use tools
-    - Chain multiple tool calls across rounds
-    - Self-terminate when it has enough information
-
-    Falls back to deep panel on failure.
-    """
+    """ReAct loop — think, act, observe, repeat."""
     model = s["fast_model"]
     task_prompt = role_prompt(s["task_type"], model)
 
@@ -1090,7 +1267,6 @@ async def node_react_agent(s):
 
     try:
         if TOOLS_ENABLED and _tool_registry and _tool_registry.has_tools:
-            # Full ReAct loop with tools
             tool_defs = _tool_registry.tool_definitions
 
             async def chat_fn(current_msgs):
@@ -1111,14 +1287,12 @@ async def node_react_agent(s):
                 timeout=FAST_PATH_TIMEOUT,
             )
 
-            # Count how many tool rounds happened
             tool_rounds = sum(
                 1 for m in final_msgs
                 if m.get("role") == "assistant" and m.get("tool_calls")
             )
             s["react_rounds"] = tool_rounds
         else:
-            # No tools — single generation
             content = await asyncio.wait_for(
                 run_model_once(
                     model,
@@ -1152,32 +1326,24 @@ async def node_react_agent(s):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IMPROVEMENT 4: Adaptive escalation — check quality and escalate if needed
+#  Adaptive escalation — check quality and escalate if needed
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def node_adaptive_escalate(s):
-    """IMPROVEMENT 4: After fast path, check if response quality warrants escalation.
-
-    Escalates to deep panel when:
-    - Fast path produced an error (empty result)
-    - Response is suspiciously short for a non-trivial question
-    - Reflection (if enabled) flags the response as incomplete
-    """
-    # If fast path already failed, escalation is already flagged
+    """After fast path, check if response quality warrants escalation."""
     if not s.get("use_fast_path") or not s.get("result_text"):
         s["escalated"] = not s.get("result_text", "")
         return s
 
     result = s["result_text"]
 
-    # ── IMPROVEMENT 4a: Length-based escalation ──
+    # Length-based escalation
     if (
         ESCALATION_ENABLED
         and len(result.strip()) < ESCALATION_MIN_LENGTH
         and s.get("confidence", 1.0) < ESCALATION_CONFIDENCE_CEILING
     ):
         question_len = len(get_last_user_text(s.get("original_messages", s["messages"])))
-        # Short response to a substantive question → escalate
         if question_len > 50:
             logger.info(
                 "Adaptive escalation: response too short (%d chars) for question (%d chars)",
@@ -1188,7 +1354,7 @@ async def node_adaptive_escalate(s):
             s["route_reason"] += " → escalated:short_response"
             return s
 
-    # ── IMPROVEMENT 3: Reflection gate ──
+    # Reflection gate
     if REFLECTION_ENABLED:
         reflection = await reflect_on_response(
             s.get("original_messages", s["messages"]),
@@ -1199,14 +1365,12 @@ async def node_adaptive_escalate(s):
         if not reflection["complete"] or reflection["quality"] == "poor":
             retries = s.get("reflection_retries", 0)
             if retries < REFLECTION_MAX_RETRIES:
-                # Try once more with the reflection feedback
                 logger.info(
                     "Reflection: incomplete (missing: %s) — retry %d",
                     reflection["missing"][:60], retries + 1,
                 )
                 s["reflection_retries"] = retries + 1
 
-                # Append reflection feedback and re-run
                 model = s["fast_model"]
                 retry_msgs = [
                     {"role": "system", "content": role_prompt(s["task_type"], model)},
@@ -1242,7 +1406,6 @@ async def node_adaptive_escalate(s):
                 except Exception as e:
                     logger.warning("Reflection retry failed: %s — escalating", e)
 
-            # Reflection retry exhausted or quality still poor → escalate
             if reflection["quality"] == "poor":
                 logger.info("Reflection: quality=poor — escalating to deep panel")
                 s["use_fast_path"] = False
@@ -1254,7 +1417,9 @@ async def node_adaptive_escalate(s):
     return s
 
 
-# ── Deep panel nodes ─────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  FIX 1: Mode-aware worker cap in node_plan_panel
+# ══════════════════════════════════════════════════════════════════════════════
 
 async def node_plan_panel(s):
     tt = s["task_type"]
@@ -1262,19 +1427,30 @@ async def node_plan_panel(s):
         tt = "general"
         s["task_type"] = "general"
     panel = _deep_panel_for_model(s["requested_model"])[tt]
-    ws = panel["workers"][:MAX_DEEP_WORKERS]
+
+    # ┌─────────────────────────────────────────────────────────────────────┐
+    # │ FIX 1: Use higher worker cap for cloud-only mode                   │
+    # │ Cloud workers run truly in parallel (no GPU semaphore), so more    │
+    # │ workers = better draft diversity at minimal cost.                   │
+    # └─────────────────────────────────────────────────────────────────────┘
+    if s["requested_model"] == "audrey_cloud":
+        max_workers = MAX_DEEP_WORKERS_CLOUD
+    else:
+        max_workers = MAX_DEEP_WORKERS
+
+    ws = panel["workers"][:max_workers]
     # Filter to healthy + available models
     healthy = [
         w
         for w in ws
         if is_model_healthy(w) and (w in _available_models or _is_cloud_model(w))
     ]
-    ws = healthy or panel["workers"][:MAX_DEEP_WORKERS]
+    ws = healthy or panel["workers"][:max_workers]
     s["deep_workers"] = ws
     s["synthesizer"] = panel["synthesizer"]
     s["fallback_synthesizer"] = panel.get("fallback_synthesizer", "")
 
-    # ── IMPROVEMENT 2: Plan sub-tasks for complex queries ──
+    # Plan sub-tasks for complex queries
     sub_tasks = await plan_sub_tasks(s["messages"], tt)
     s["sub_tasks"] = sub_tasks
 
@@ -1288,7 +1464,6 @@ async def node_parallel_generate(s):
 
     async def one(wn, sub_task=None):
         if sub_task:
-            # Worker gets a focused sub-task instead of the raw question
             sys_content = (
                 f"{role_prompt(s['task_type'], wn, structured=True)}\n\n"
                 f"You are assigned this specific sub-task:\n{sub_task}\n\n"
@@ -1322,9 +1497,7 @@ async def node_parallel_generate(s):
 
     workers = s["deep_workers"]
 
-    # IMPROVEMENT 2: Assign sub-tasks to workers if planning produced them
     if sub_tasks and len(sub_tasks) >= 2:
-        # Map sub-tasks to workers (round-robin if more tasks than workers)
         assignments = []
         for i, task in enumerate(sub_tasks):
             worker = workers[i % len(workers)]
@@ -1334,7 +1507,6 @@ async def node_parallel_generate(s):
             len(assignments), len(workers),
         )
     else:
-        # No planning — each worker gets the full question
         assignments = [(w, None) for w in workers]
 
     cloud_tasks = [(w, t) for w, t in assignments if _is_cloud_model(w)]
@@ -1426,10 +1598,6 @@ async def node_synthesize(s):
     raise RuntimeError("No synthesizers")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  IMPROVEMENT 3 (deep path): Reflection for deep panel synthesis
-# ══════════════════════════════════════════════════════════════════════════════
-
 async def node_reflect_deep(s):
     """Reflection gate for deep panel output. Re-synthesizes if quality is poor."""
     if not REFLECTION_ENABLED or not s.get("result_text"):
@@ -1445,7 +1613,6 @@ async def node_reflect_deep(s):
         s["reflection_retries"] = s.get("reflection_retries", 0) + 1
         logger.info("Deep reflection: quality=poor — re-synthesizing with feedback")
 
-        # Augment synthesis messages with the reflection feedback
         s["synthesis_messages"].append({
             "role": "user",
             "content": (
@@ -1454,7 +1621,6 @@ async def node_reflect_deep(s):
                 f"Please re-synthesize with more attention to completeness and accuracy."
             ),
         })
-        # Re-run synthesis
         return await node_synthesize(s)
 
     return s
@@ -1468,8 +1634,8 @@ def build_deep_graph(include_synthesis=True):
     for n, f in [
         ("classify", node_classify),
         ("web_search", web_search_node),
-        ("plan", node_plan_panel),          # IMPROVEMENT 2: includes planning
-        ("parallel", node_parallel_generate),  # IMPROVEMENT 2: sub-task aware
+        ("plan", node_plan_panel),
+        ("parallel", node_parallel_generate),
         ("prep", node_prepare_synthesis),
     ]:
         g.add_node(n, f)
@@ -1480,7 +1646,7 @@ def build_deep_graph(include_synthesis=True):
     g.add_edge("parallel", "prep")
     if include_synthesis:
         g.add_node("synth", node_synthesize)
-        g.add_node("reflect_deep", node_reflect_deep)  # IMPROVEMENT 3
+        g.add_node("reflect_deep", node_reflect_deep)
         g.add_edge("prep", "synth")
         g.add_edge("synth", "reflect_deep")
         g.add_edge("reflect_deep", END)
@@ -1495,8 +1661,8 @@ def build_fast_graph():
     for n, f in [
         ("classify", node_classify),
         ("web_search", web_search_node),
-        ("react_agent", node_react_agent),         # IMPROVEMENT 1: ReAct loop
-        ("escalate", node_adaptive_escalate),       # IMPROVEMENTS 3+4: reflect + escalate
+        ("react_agent", node_react_agent),
+        ("escalate", node_adaptive_escalate),
     ]:
         g.add_node(n, f)
     g.set_entry_point("classify")
@@ -1584,8 +1750,10 @@ async def lifespan(app):
     await validate_models()
 
     logger.info(
-        "Orchestrator ready  tools=%s(%d)  search=%s  fast_path=%s  "
-        "react=%s  reflect=%s  plan=%s  escalate=%s",
+        "Orchestrator ready  router=%s  tools=%s(%d)  search=%s  fast_path=%s  "
+        "react=%s  reflect=%s  plan=%s  escalate=%s  "
+        "max_workers_local=%d  max_workers_cloud=%d",
+        ROUTER_MODEL,
         TOOLS_ENABLED,
         _tool_registry.tool_count,
         SEARCH_BACKEND,
@@ -1594,6 +1762,8 @@ async def lifespan(app):
         REFLECTION_ENABLED,
         PLANNING_ENABLED,
         ESCALATION_ENABLED,
+        MAX_DEEP_WORKERS,
+        MAX_DEEP_WORKERS_CLOUD,
     )
 
     yield
@@ -1604,7 +1774,7 @@ async def lifespan(app):
 
 app = FastAPI(
     title="LangGraph Auto-Orchestrator",
-    version="6.0.0",
+    version="6.1.0",
     lifespan=lifespan,
 )
 
@@ -1628,6 +1798,7 @@ async def healthcheck():
                 return {
                     "ok": True,
                     "ollama": "reachable",
+                    "router_model": ROUTER_MODEL,
                     "cache": _cache.stats,
                     "tools": {
                         "enabled": TOOLS_ENABLED,
@@ -1640,6 +1811,10 @@ async def healthcheck():
                         "reflection": REFLECTION_ENABLED,
                         "planning": PLANNING_ENABLED,
                         "escalation": ESCALATION_ENABLED,
+                    },
+                    "max_workers": {
+                        "local": MAX_DEEP_WORKERS,
+                        "cloud": MAX_DEEP_WORKERS_CLOUD,
                     },
                     "available_models": len(_available_models),
                 }
@@ -1731,10 +1906,8 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
         and req.model == "audrey_deep"
         and not stream_prepare_only
     ):
-        # Run classify + web_search + react_agent + adaptive_escalate
         r = await FAST_GRAPH.ainvoke(s)
 
-        # Check if fast path succeeded (not escalated)
         if r.get("use_fast_path") and r.get("result_text") and not r.get("escalated"):
             r["latency_ms"] = int((time.time() - s["started_at"]) * 1000)
             if CACHE_ENABLED:
@@ -1813,11 +1986,7 @@ def _sc(rid, created, mn, text):
 
 
 async def stream_fast_path(s):
-    """Stream output from fast-path ReAct agent.
-
-    Note: Streaming mode uses direct generation (no tool loop) for latency.
-    Non-streaming mode gets the full ReAct loop with tools.
-    """
+    """Stream output from fast-path ReAct agent."""
     ct = int(time.time())
     rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     mn = s["requested_model"]
@@ -1869,7 +2038,7 @@ async def stream_fast_path(s):
 
 
 async def stream_synthesis(ps):
-    """Stream the synthesis phase. Used by deep-panel modes."""
+    """Stream the synthesis phase."""
     ct = int(time.time())
     rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     mn = ps["requested_model"]
@@ -1986,7 +2155,7 @@ async def chat_completions(req: ChatCompletionRequest):
                 async for chunk in stream_fast_path(searched):
                     yield chunk
             else:
-                # Deep panel: plan, parallel generate, prep, then stream synthesis
+                # Deep panel
                 planned = await node_plan_panel(searched)
                 if planned.get("sub_tasks"):
                     yield _sc(rid, ct, req.model, f"📋 Planning: {len(planned['sub_tasks'])} sub-tasks\n")

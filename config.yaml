@@ -132,9 +132,6 @@ model_registry:
 fast_path:
   enabled: true
   confidence_threshold: 0.88   # only fast-path when router is very sure
-  # Models that support tool calling well enough for the fast path.
-  # The orchestrator picks the highest-priority healthy model from the
-  # matching task_type list in model_registry.
   tool_capable_models:
     - "qwen3.5:397b-cloud"
     - "deepseek-v3.2:cloud"
@@ -149,7 +146,6 @@ fast_path:
     - "llama4:latest"
 
 # ─── Deep Panel (auto — mixed cloud + local workers) ───
-# "auto" mode picks from any available model for maximum quality.
 deep_panel:
   code:
     workers:
@@ -183,6 +179,8 @@ deep_panel:
     fallback_synthesizer: "glm-5.1:cloud"
 
 # ─── Deep Panel Cloud (all cloud: workers + synthesizer) ───
+# FIX 1: These panels now benefit from MAX_DEEP_WORKERS_CLOUD=3
+# so all 3 workers are used instead of being capped at 2.
 deep_panel_cloud:
   code:
     workers:
@@ -249,40 +247,24 @@ deep_panel_local:
     fallback_synthesizer: "olmo-3.1:32b"
 
 # ─── Agentic Features ───
-# Controls for the 5 agentic improvements to the orchestrator pipeline.
 agentic:
-  # IMPROVEMENT 1: ReAct agent loop on fast path
-  # Instead of single-shot generation, the fast path now iterates:
-  #   think → act (tool call) → observe → repeat
   react:
-    max_rounds: 3            # max think/act/observe iterations per request
-    # Context compression kicks in during multi-round tool use to prevent
-    # context window exhaustion (IMPROVEMENT 5).
-    compress_after_rounds: 2   # compress tool history after this many rounds
-    compress_max_result_chars: 2000  # truncate individual tool results beyond this
+    max_rounds: 3
+    compress_after_rounds: 2
+    compress_max_result_chars: 2000
 
-  # IMPROVEMENT 2: Planning node for complex queries
-  # Decomposes multi-part questions into focused sub-tasks, then assigns
-  # each sub-task to a different deep-panel worker for parallel execution.
   planning:
     enabled: true
-    min_tokens: 40           # skip planning for very short/simple queries
+    min_tokens: 40
 
-  # IMPROVEMENT 3: Reflection gate
-  # After generation, a lightweight check (using the router model) verifies
-  # the response actually answers the question. If incomplete, it either
-  # retries with feedback or escalates to deep panel.
   reflection:
     enabled: true
-    max_retries: 1           # how many reflection-guided retries before escalating
+    max_retries: 1
 
-  # IMPROVEMENT 4: Adaptive escalation (fast → deep)
-  # Automatically escalates from fast path to deep panel when the response
-  # appears too thin for the question's complexity.
   escalation:
     enabled: true
-    min_response_length: 100       # responses shorter than this trigger length check
-    confidence_ceiling: 0.95       # only escalate if confidence is below this
+    min_response_length: 100
+    confidence_ceiling: 0.95
 
 # ─── Timeouts (seconds) ───
 timeouts:
@@ -301,19 +283,13 @@ cache:
   ttl_seconds: 600
 
 # ─── Search ───
-# backend: "searxng" (local, no API key) or "brave" (requires BRAVE_API_KEY env var)
 search:
   backend: searxng
   max_results: 5
 
 # ─── Tool Servers ───
-# OpenAPI-compatible tool server URLs. The orchestrator discovers tools
-# automatically by fetching /openapi.json from each server on startup.
-# Accepts plain URL strings or {url, name} dicts.
 tool_servers:
-  - "http://custom-tools:8001"    # custom tools (search, memory, python, sysmon, fs, sql, docs)
-  # - "http://localhost:8002"     # example: openapi-servers/filesystem
-  # - "http://localhost:8003"     # example: openapi-servers/memory
+  - "http://custom-tools:8001"
 
 # ─── Tools ───
 tools:
