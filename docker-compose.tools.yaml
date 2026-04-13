@@ -1,9 +1,9 @@
 # Tool services — add to your existing docker-compose or run standalone.
-# These are the support services the orchestrator discovers via OpenAPI.
+# These are the support services Audrey discovers via OpenAPI.
 #
 #   docker compose -f docker-compose.tools.yaml up -d
 #
-# The orchestrator connects to these via the URLs in config.yaml tool_servers.
+# Audrey connects to these via the URLs in config.yaml tool_servers.
 
 services:
   # ── SearXNG (replaces Brave — zero API keys) ──
