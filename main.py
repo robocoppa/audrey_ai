@@ -584,7 +584,59 @@ async def ollama_chat_stream(
 
 # ── Router classification ───────────────────────────────────────────────────
 _ROUTER_SYSTEM = """You are a request router. Classify into: code, reasoning, vl, general.
-Return strict JSON: task_type, confidence (0-1), needs_vision, route_reason. No fences."""
+Return ONLY strict JSON: {"task_type": "...", "confidence": 0.0, "needs_vision": false, "route_reason": "..."}
+No markdown fences, no explanation, no preamble. Just the JSON object."""
+
+
+def _extract_json(raw: str) -> Optional[dict]:
+    """Robustly extract a JSON object from model output.
+
+    Handles: markdown fences, preamble text, thinking tags, trailing garbage.
+    """
+    if not raw or not raw.strip():
+        return None
+
+    text = raw.strip()
+
+    # Strip <think>...</think> blocks (some models emit these)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    # Strip markdown fences: ```json ... ``` or ``` ... ```
+    fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    # Try direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Find the first { ... } block in the text
+    brace_match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
+    if brace_match:
+        try:
+            return json.loads(brace_match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    # Find nested braces (for cases like {"key": {"nested": ...}})
+    depth = 0
+    start = None
+    for i, c in enumerate(text):
+        if c == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    return json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    start = None
+
+    return None
 
 
 async def classify_request(msgs):
@@ -611,8 +663,9 @@ async def classify_request(msgs):
             request_timeout=timeout_for_model(ROUTER_MODEL, is_router=True),
         )
     )["message"]["content"]
-    try:
-        p = json.loads(raw)
+
+    p = _extract_json(raw)
+    if p:
         tt = p.get("task_type", "general")
         if tt not in {"code", "reasoning", "vl", "general"}:
             tt = "general"
@@ -622,13 +675,15 @@ async def classify_request(msgs):
             "needs_vision": bool(p.get("needs_vision", False)),
             "route_reason": str(p.get("route_reason", "router")),
         }
-    except Exception:
-        return {
-            "task_type": "general",
-            "confidence": 0.45,
-            "needs_vision": False,
-            "route_reason": "Router parse failure.",
-        }
+
+    # Parse failed — log the raw output so you can diagnose
+    logger.warning("Router parse failure. Raw output: %s", raw[:300])
+    return {
+        "task_type": "general",
+        "confidence": 0.75,
+        "needs_vision": False,
+        "route_reason": f"Router parse failure (raw: {raw[:80]})",
+    }
 
 
 # ── Model selection (uses MODEL_REGISTRY for fast path) ─────────────────────
@@ -768,9 +823,10 @@ async def plan_sub_tasks(msgs: List[Dict[str, Any]], task_type: str) -> Optional
     if not PLANNING_ENABLED:
         return None
 
-    flat = flatten_messages(msgs)
-    # Skip planning for short, simple queries
-    if estimate_tokens(flat) < PLANNING_MIN_TOKENS:
+    # Check complexity based on the USER message, not the full conversation
+    # (which includes injected datetime system messages that inflate the count)
+    user_text = get_last_user_text(msgs)
+    if estimate_tokens(user_text) < PLANNING_MIN_TOKENS:
         return None
 
     try:
@@ -778,15 +834,15 @@ async def plan_sub_tasks(msgs: List[Dict[str, Any]], task_type: str) -> Optional
             ROUTER_MODEL,
             [
                 {"role": "system", "content": _PLANNER_SYSTEM},
-                {"role": "user", "content": f"Task type: {task_type}\n\nRequest:\n{flat}"},
+                {"role": "user", "content": f"Task type: {task_type}\n\nRequest:\n{user_text}"},
             ],
             temperature=0.0,
             max_tokens=300,
             top_p=0.9,
             stop=None,
         )
-        parsed = json.loads(raw)
-        if parsed.get("plan") == "decompose" and parsed.get("sub_tasks"):
+        parsed = _extract_json(raw)
+        if parsed and parsed.get("plan") == "decompose" and parsed.get("sub_tasks"):
             tasks = parsed["sub_tasks"]
             if isinstance(tasks, list) and 2 <= len(tasks) <= 4:
                 logger.info("Planner decomposed into %d sub-tasks", len(tasks))
@@ -846,7 +902,10 @@ async def reflect_on_response(
             top_p=0.9,
             stop=None,
         )
-        parsed = json.loads(raw)
+        parsed = _extract_json(raw)
+        if not parsed:
+            logger.warning("Reflection parse failure. Raw: %s", raw[:200])
+            return {"complete": True, "quality": "good", "missing": ""}
         result = {
             "complete": bool(parsed.get("complete", True)),
             "quality": parsed.get("quality", "good"),
