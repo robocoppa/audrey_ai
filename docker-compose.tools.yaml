@@ -1,0 +1,46 @@
+# Tool services — add to your existing docker-compose or run standalone.
+# These are the support services the orchestrator discovers via OpenAPI.
+#
+#   docker compose -f docker-compose.tools.yaml up -d
+#
+# The orchestrator connects to these via the URLs in config.yaml tool_servers.
+
+services:
+  # ── SearXNG (replaces Brave — zero API keys) ──
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+
+  # ── Custom tool server (search, memory, python, sysmon, filesystem, SQL, docs) ──
+  custom-tools:
+    build:
+      context: .
+      dockerfile: Dockerfile.tools
+    container_name: custom-tools
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+      - TOOLS_SANDBOX_DIR=/app/sandbox
+      - TOOLS_MEMORY_DB=/app/data/memory.db
+      - TOOLS_SQL_DB=/app/data/local.db
+      - TOOLS_PYTHON_TIMEOUT=30
+    volumes:
+      - tools-data:/app/data
+      - tools-sandbox:/app/sandbox
+    depends_on:
+      - searxng
+
+volumes:
+  tools-data:
+  tools-sandbox:

@@ -1,0 +1,74 @@
+# Full stack: orchestrator + tool services + SearXNG
+#
+#   docker compose up -d
+#
+# Requires Ollama running on the host (or adjust OLLAMA_BASE_URL).
+
+services:
+  # ── Orchestrator ──
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: audrey-orchestrator
+    restart: unless-stopped
+    ports:
+      - "${ORCHESTRATOR_PORT:-8000}:8000"
+    environment:
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - ROUTER_MODEL=${ROUTER_MODEL:-qwen2.5:1.5b}
+      - DEFAULT_TEMPERATURE=${DEFAULT_TEMPERATURE:-0.2}
+      - GPU_CONCURRENCY=${GPU_CONCURRENCY:-1}
+      - MAX_DEEP_WORKERS=${MAX_DEEP_WORKERS:-2}
+      - API_KEY=${API_KEY:-}
+      - TOOLS_ENABLED=${TOOLS_ENABLED:-true}
+      - SEARCH_BACKEND=${SEARCH_BACKEND:-searxng}
+      - SEARXNG_URL=http://searxng:8080
+      - BRAVE_API_KEY=${BRAVE_API_KEY:-}
+      - EMIT_ROUTING_BANNER=${EMIT_ROUTING_BANNER:-true}
+      - EMIT_STATUS_UPDATES=${EMIT_STATUS_UPDATES:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - searxng
+      - custom-tools
+
+  # ── SearXNG (local web search — no API keys) ──
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "${SEARXNG_PORT:-8080}:8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+
+  # ── Custom tool server ──
+  custom-tools:
+    build:
+      context: .
+      dockerfile: Dockerfile.tools
+    container_name: custom-tools
+    restart: unless-stopped
+    ports:
+      - "${TOOLS_PORT:-8001}:8001"
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+      - TOOLS_SANDBOX_DIR=/app/sandbox
+      - TOOLS_MEMORY_DB=/app/data/memory.db
+      - TOOLS_SQL_DB=/app/data/local.db
+      - TOOLS_PYTHON_TIMEOUT=30
+    volumes:
+      - tools-data:/app/data
+      - tools-sandbox:/app/sandbox
+    depends_on:
+      - searxng
+
+volumes:
+  tools-data:
+  tools-sandbox:
