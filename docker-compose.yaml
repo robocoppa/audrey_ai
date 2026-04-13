@@ -5,15 +5,15 @@
 # Requires Ollama running on the host (or adjust OLLAMA_BASE_URL).
 
 services:
-  # ── Orchestrator ──
-  orchestrator:
+  # ── Audrey ──
+  audrey:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: audrey-orchestrator
+    container_name: audrey-ai
     restart: unless-stopped
     ports:
-      - "${ORCHESTRATOR_PORT:-8000}:8000"
+      - "${AUDREY_PORT:-8000}:8000"
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - ROUTER_MODEL=${ROUTER_MODEL:-qwen3:4b}
