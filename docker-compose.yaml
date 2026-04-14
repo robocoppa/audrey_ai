@@ -36,6 +36,8 @@ services:
       - custom-tools
     networks:
       - ollama-net
+    labels:
+      - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/audrey.png
 
   # ── SearXNG (local web search — no API keys) ──
   searxng:
