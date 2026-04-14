@@ -1,6 +1,6 @@
 # Audrey — LangGraph Auto-Orchestrator
 
-A self-hosted AI orchestrator that routes requests to the best available model using a **fast-path / deep-panel** architecture. Runs entirely on your own hardware with [Ollama](https://ollama.com), supports cloud-bridged models, automatic tool calling via OpenAPI, and web search — all behind an OpenAI-compatible API.
+A self-hosted AI orchestrator that routes requests to the best available model using a **fast-path / deep-panel** architecture with agentic capabilities. Runs entirely on your own hardware with [Ollama](https://ollama.com), supports cloud-bridged models, automatic tool calling via OpenAPI, ReAct agent loops, planning, reflection, and web search — all behind an OpenAI-compatible API.
 
 ## Architecture
 
@@ -8,14 +8,23 @@ A self-hosted AI orchestrator that routes requests to the best available model u
 Client (OpenAI-compatible) ──► /v1/chat/completions
                                       │
                               ┌───────▼────────┐
-                              │  Router (1.5B)  │  ← classifies: code / reasoning / vl / general
+                              │  Router (4B)   │  ← classifies: code / reasoning / vl / general
                               └───────┬────────┘
                                       │
                          ┌────────────┼────────────┐
                          ▼                         ▼
                    ⚡ Fast Path               🧠 Deep Panel
-                 (single best model         (2-3 workers in parallel
-                  + tool calling)            → synthesizer merges)
+                (ReAct agent loop          (2-3 workers in parallel
+                 + tool calling             → synthesizer merges)
+                 + reflection)                     │
+                         │                    📋 Planning
+                         │                 (optional sub-task
+                         │                  decomposition)
+                         │                         │
+                    Adaptive Escalation       Reflection Gate
+                   (quality check →           (quality check →
+                    escalate to deep           re-synthesize
+                    if needed)                 if needed)
                          │                         │
                          └────────────┬────────────┘
                                       │
@@ -27,23 +36,26 @@ Client (OpenAI-compatible) ──► /v1/chat/completions
 
 **Three virtual models** are exposed:
 
-| Model           | Behavior |
-|-----------------|----------|
-| `audrey_deep`   | Auto-routes: fast path when confident, deep panel otherwise. Mixed cloud + local workers. |
-| `audrey_cloud`  | Always deep panel with cloud-only workers + synthesizer. |
-| `audrey_local`  | Always deep panel with local-only workers + synthesizer. |
+| Model            | Behavior |
+|------------------|----------|
+| `audrey_deep`    | Auto-routes: fast path (ReAct) when confident, deep panel otherwise. Mixed cloud + local workers. |
+| `audrey_cloud`   | Always deep panel with cloud-only workers + synthesizer. |
+| `audrey_local`   | Always deep panel with local-only workers + synthesizer. |
 
 ## Features
 
-- **Smart routing** — A small router model classifies requests by type and confidence, then picks the optimal path.
-- **Fast path** — High-confidence requests go to a single top model with tool support. Low latency.
-- **Deep panel** — Complex requests fan out to 2-3 specialist workers in parallel, then a synthesizer merges their outputs.
-- **Automatic tool calling** — Discovers tools from any OpenAPI-compatible server at startup. Zero hardcoding.
+- **Smart routing** — A small router model (`qwen3:4b`) classifies requests by type and confidence, with keyword pre-filters for common patterns.
+- **Fast path with ReAct** — High-confidence requests go to a single top model running a ReAct agent loop (think → act → observe) with tool support.
+- **Adaptive escalation** — Fast-path responses are quality-checked; short or poor answers automatically escalate to the deep panel.
+- **Deep panel with planning** — Complex requests are optionally decomposed into sub-tasks, then fanned out to 2-3 specialist workers in parallel. A synthesizer merges their outputs.
+- **Reflection gates** — Both fast path and deep panel outputs pass through a reflection check. Poor quality triggers retry or re-synthesis.
+- **Automatic tool calling** — Discovers tools from any OpenAPI-compatible server at startup. Zero hardcoding. Context compression prevents window exhaustion during multi-round tool use.
 - **Web search** — SearXNG (local, no API key) or Brave Search. Auto-triggered by temporal/factual queries.
 - **Model health tracking** — Exponential backoff on failures, automatic fallback to healthy models.
+- **Separate cloud worker cap** — Cloud workers run truly in parallel (no GPU semaphore), so `MAX_DEEP_WORKERS_CLOUD` can be higher than the local cap.
 - **Caching** — LRU cache with TTL for repeated queries.
 - **OpenAI-compatible API** — Drop-in replacement for any client that speaks `/v1/chat/completions`.
-- **Streaming** — Full SSE streaming support.
+- **Streaming** — Full SSE streaming support with status updates.
 
 ## Quick Start
 
@@ -56,8 +68,8 @@ Client (OpenAI-compatible) ──► /v1/chat/completions
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/audrey-orchestrator.git
-cd audrey-orchestrator
+git clone https://github.com/robocoppa/audrey_ai.git
+cd audrey_ai
 cp .env.example .env
 # Edit .env with your settings (Ollama URL, API key, etc.)
 ```
@@ -66,7 +78,7 @@ cp .env.example .env
 
 ```bash
 # Required: the router model
-ollama pull qwen2.5:1.5b
+ollama pull qwen3:4b
 
 # Recommended local models (adjust to your VRAM)
 ollama pull qwen3.5:35b-a3b
@@ -148,10 +160,11 @@ If you're **cloud-only**, use `audrey_cloud` and configure `deep_panel_cloud` wi
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama API endpoint |
-| `ROUTER_MODEL` | `qwen2.5:1.5b` | Small model for request classification |
+| `ROUTER_MODEL` | `qwen3:4b` | Small model for request classification |
 | `DEFAULT_TEMPERATURE` | `0.2` | Default temperature for generation |
 | `GPU_CONCURRENCY` | `1` | Max concurrent local model requests |
-| `MAX_DEEP_WORKERS` | `2` | Max parallel workers in deep panel |
+| `MAX_DEEP_WORKERS` | `2` | Max parallel local workers in deep panel |
+| `MAX_DEEP_WORKERS_CLOUD` | `3` | Max parallel cloud workers in deep panel |
 | `API_KEY` | _(empty)_ | Bearer token for API auth (disabled if empty) |
 | `TOOLS_ENABLED` | `true` | Enable/disable tool calling |
 | `SEARCH_BACKEND` | `searxng` | `searxng` or `brave` |
@@ -160,10 +173,31 @@ If you're **cloud-only**, use `audrey_cloud` and configure `deep_panel_cloud` wi
 | `EMIT_ROUTING_BANNER` | `true` | Show routing metadata in responses |
 | `EMIT_STATUS_UPDATES` | `true` | Show status messages during streaming |
 | `LOG_LEVEL` | `INFO` | Logging level |
+| `REACT_MAX_ROUNDS` | `3` | Max ReAct agent tool-calling rounds |
+| `REFLECTION_ENABLED` | `true` | Enable response quality reflection |
+| `PLANNING_ENABLED` | `true` | Enable sub-task decomposition for deep panel |
+| `ESCALATION_ENABLED` | `true` | Enable fast-path → deep-panel escalation |
 
 ### config.yaml
 
 See the inline comments in [`config.yaml`](config.yaml) for full documentation of model registries, panel configs, timeouts, and cache settings.
+
+## Agentic Features
+
+### ReAct Agent (Fast Path)
+The fast path runs a ReAct (Reason + Act) loop: the model thinks about the request, optionally calls tools, observes the results, and repeats until it has enough information to respond. This replaces the old single-shot fast path with a more capable agent.
+
+### Planning (Deep Panel)
+For complex queries, the router model can decompose the request into 2-3 focused sub-tasks before dispatching to workers. Each worker gets a specific sub-task assignment, and the synthesizer combines the focused answers.
+
+### Reflection Gates
+Both paths include quality checks. A reflection model evaluates whether the response is complete and of good quality. Poor responses trigger either a retry (fast path) or re-synthesis (deep panel).
+
+### Adaptive Escalation
+If the fast-path response is too short relative to the question complexity, or if reflection rates it as poor, the request automatically escalates to the full deep panel for a more thorough answer.
+
+### Context Compression
+During multi-round tool use, older tool call/result pairs are compressed into summaries to prevent context window exhaustion. Recent exchanges are preserved in full.
 
 ## Adding Custom Tools
 
@@ -186,7 +220,7 @@ The built-in tool server (`custom_tools.py`) provides: web search, key-value mem
 |--------|------|-------------|
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat completion |
 | `GET`  | `/v1/models` | List available virtual models |
-| `GET`  | `/health` | Health check with Ollama status, cache stats, tool info |
+| `GET`  | `/health` | Health check with Ollama status, cache stats, tool info, agentic config |
 | `POST` | `/v1/tools/rediscover` | Re-scan tool servers without restart |
 
 ## Using with Clients
@@ -222,10 +256,10 @@ curl http://localhost:8000/v1/chat/completions \
 
 ```
 audrey-orchestrator/
-├── main.py                  # FastAPI orchestrator (routing, panels, streaming)
-├── tool_registry.py         # OpenAPI tool discovery and dispatch
+├── main.py                  # FastAPI orchestrator (routing, ReAct, panels, streaming)
+├── tool_registry.py         # OpenAPI tool discovery, dispatch, context compression
 ├── custom_tools.py          # Built-in tool server (search, memory, python, etc.)
-├── config.yaml              # Model registry, panels, timeouts, tool servers
+├── config.yaml              # Model registry, panels, agentic config, timeouts, tool servers
 ├── requirements.txt         # Python dependencies (orchestrator)
 ├── requirements.tools.txt   # Python dependencies (tool server)
 ├── Dockerfile               # Orchestrator container
