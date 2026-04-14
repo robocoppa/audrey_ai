@@ -102,12 +102,12 @@ async def web_search_node(s):
     s["search_results"] = []
     s["original_messages"] = [m.copy() for m in s["messages"]]
 
-    flat = flatten_messages(s["messages"])
-    if not needs_web_search(flat):
-        return s
-
+    # Only check user messages for search triggers.
+    # Previously this used flatten_messages() which included all messages,
+    # causing the injected datetime system message (containing "today",
+    # "yesterday", "this week", etc.) to false-trigger search on every request.
     last = get_last_user_text(s["messages"])
-    if not last:
+    if not last or not needs_web_search(last):
         return s
 
     q = extract_search_query(last)
