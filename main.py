@@ -1216,6 +1216,7 @@ class OrchestratorState(TypedDict, total=False):
     reflection_result: Dict[str, Any]
     reflection_retries: int
     escalated: bool
+    tools_used: List[Dict[str, Any]]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1333,7 +1334,7 @@ async def node_react_agent(s):
                     tools=tool_defs,
                 )
 
-            content, final_msgs = await asyncio.wait_for(
+            content, final_msgs, tool_calls_log = await asyncio.wait_for(
                 _tool_registry.run_with_tools(chat_fn, msgs),
                 timeout=FAST_PATH_TIMEOUT,
             )
@@ -1343,6 +1344,18 @@ async def node_react_agent(s):
                 if m.get("role") == "assistant" and m.get("tool_calls")
             )
             s["react_rounds"] = tool_rounds
+
+            # ┌─────────────────────────────────────────────────────────┐
+            # │ FIX 6: Store tool usage for banner + log observability  │
+            # └─────────────────────────────────────────────────────────┘
+            s["tools_used"] = tool_calls_log
+            if tool_calls_log:
+                tool_names = list(dict.fromkeys(t["tool"] for t in tool_calls_log))
+                logger.info(
+                    "ReAct tools used (%d calls): %s",
+                    len(tool_calls_log),
+                    ", ".join(tool_names),
+                )
         else:
             content = await asyncio.wait_for(
                 run_model_once(
@@ -1949,6 +1962,7 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
         "reflection_result": {},
         "reflection_retries": 0,
         "escalated": False,
+        "tools_used": [],
     }
 
     # Try fast path first for audrey_deep
@@ -1974,6 +1988,8 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
                     "react_rounds": r.get("react_rounds", 0),
                     "reflection": r.get("reflection_result", {}).get("quality", "n/a"),
                     "search": r.get("search_performed", False),
+                    "search_query": r.get("search_query", ""),
+                    "tools": [t.get("tool", "") for t in r.get("tools_used", [])],
                     "ms": r["latency_ms"],
                 })
             )
@@ -2004,6 +2020,8 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
             "planned": bool(r.get("sub_tasks")),
             "reflection": r.get("reflection_result", {}).get("quality", "n/a"),
             "search": r.get("search_performed", False),
+            "search_query": r.get("search_query", ""),
+            "tools": [t.get("tool", "") for t in r.get("tools_used", [])],
             "escalated": r.get("escalated", False),
             "ms": r["latency_ms"],
         })
@@ -2013,7 +2031,6 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
 
 def banner(s):
     sel = s.get("selected_model") or s.get("synthesizer") or "?"
-    sr = " | +search" if s.get("search_performed") else ""
     path = "fast+react" if s.get("use_fast_path") else "deep"
     esc = " | ESCALATED" if s.get("escalated") else ""
     plan = " | planned" if s.get("sub_tasks") else ""
@@ -2022,9 +2039,33 @@ def banner(s):
     rr = s.get("reflection_result", {})
     if rr.get("quality"):
         refl = f" | refl:{rr['quality']}"
+
+    # ┌─────────────────────────────────────────────────────────────────────┐
+    # │ FIX 6: Show search query and tool names in the banner              │
+    # └─────────────────────────────────────────────────────────────────────┘
+    sr = ""
+    if s.get("search_performed"):
+        sq = s.get("search_query", "")
+        sr = f" | 🌐 search: \"{sq}\"" if sq else " | +search"
+
+    tools_str = ""
+    tools_log = s.get("tools_used", [])
+    if tools_log:
+        # Deduplicate tool names preserving order, strip server prefix for readability
+        seen = {}
+        for t in tools_log:
+            raw_name = t.get("tool", "")
+            # Strip "servername__" prefix for cleaner display
+            short = raw_name.split("__", 1)[-1] if "__" in raw_name else raw_name
+            if short not in seen:
+                seen[short] = 0
+            seen[short] += 1
+        parts = [f"{n}×{c}" if c > 1 else n for n, c in seen.items()]
+        tools_str = f" | 🔧 tools: {', '.join(parts)}"
+
     return (
         f"[{s.get('requested_model')} → {sel} | {s.get('task_type')} "
-        f"| conf {s.get('confidence', 0):.2f} | {path}{sr}{react}{plan}{refl}{esc} "
+        f"| conf {s.get('confidence', 0):.2f} | {path}{sr}{tools_str}{react}{plan}{refl}{esc} "
         f"| {s.get('route_reason', '')}]\n"
     )
 
@@ -2191,6 +2232,7 @@ async def chat_completions(req: ChatCompletionRequest):
                 "reflection_result": {},
                 "reflection_retries": 0,
                 "escalated": False,
+                "tools_used": [],
             }
 
             # Classify

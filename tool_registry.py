@@ -451,10 +451,16 @@ class ToolRegistry:
         messages: List[Dict[str, Any]],
         *,
         compress_enabled: bool = True,
-    ) -> Tuple[str, List[Dict[str, Any]]]:
+    ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Run a model with tool calling.  Loops until the model responds with
         plain text or MAX_TOOL_ROUNDS is reached.
+
+        Returns: (content, final_messages, tool_calls_log)
+            - content: the model's final text response
+            - final_messages: the full conversation including tool exchanges
+            - tool_calls_log: list of dicts tracking each tool invocation
+              for observability (round, tool name, args preview, result length)
 
         Improvement: compresses context after COMPRESS_AFTER_ROUNDS to prevent
         context window exhaustion during multi-round tool use.
@@ -483,7 +489,7 @@ class ToolRegistry:
                 content = msg.get("content", "")
                 if not content or not content.strip():
                     raise RuntimeError("Model returned empty content")
-                return content, current
+                return content, current, tool_calls_log
 
             logger.info(
                 "Tool round %d: %d call(s)", round_num + 1, len(tool_calls),
@@ -527,4 +533,5 @@ class ToolRegistry:
         return (
             data["message"].get("content", "") or "[Tool rounds exhausted]",
             current,
+            tool_calls_log,
         )
