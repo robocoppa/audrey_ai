@@ -39,7 +39,7 @@ services:
     networks:
       - ollama-net
     labels:
-      - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/audrey2.png
+      - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/images/audrey2.png
 
   # ── SearXNG (local web search — no API keys) ──
   searxng:
@@ -57,7 +57,7 @@ services:
     networks:
       - ollama-net
     labels:
-      - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/search.png
+      - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/images/search.png
 
   # ── Custom tool server ──
   custom-tools:
@@ -82,7 +82,7 @@ services:
     networks:
       - ollama-net
     labels:
-      - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/toolbox.png
+      - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/images/toolbox.png
 
 networks:
   ollama-net:

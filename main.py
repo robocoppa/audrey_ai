@@ -215,9 +215,9 @@ async def healthcheck():
                     },
                     "available_models": len(state.available_models),
                 }
-            return JSONResponse(503, {"ok": False, "ollama": f"status {r.status}"})
+            return JSONResponse({"ok": False, "ollama": f"status {r.status}"}, status_code=503)
     except Exception as e:
-        return JSONResponse(503, {"ok": False, "ollama": f"unreachable: {e}"})
+        return JSONResponse({"ok": False, "ollama": f"unreachable: {e}"}, status_code=503)
 
 
 @app.get("/v1/models", dependencies=[Depends(verify_api_key)])

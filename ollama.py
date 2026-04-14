@@ -197,5 +197,5 @@ async def run_model_with_tools(
             tools=tool_defs,
         )
 
-    content, _ = await state.tool_registry.run_with_tools(chat_fn, msgs)
+    content, _, _ = await state.tool_registry.run_with_tools(chat_fn, msgs)
     return content

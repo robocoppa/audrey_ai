@@ -46,7 +46,7 @@ DEEP_WORKER_TIMEOUT = int(
 API_KEY = os.getenv("API_KEY", "")
 TOOLS_ENABLED = os.getenv("TOOLS_ENABLED", "true").lower() == "true"
 SEARCH_BACKEND = os.getenv("SEARCH_BACKEND", "searxng")
-SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8081")
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8080")
 SEARXNG_MAX_RESULTS = int(os.getenv("SEARXNG_MAX_RESULTS", "5"))
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
 BRAVE_MAX_RESULTS = int(os.getenv("BRAVE_MAX_RESULTS", "5"))
