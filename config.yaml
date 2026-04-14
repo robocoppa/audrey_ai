@@ -129,21 +129,32 @@ model_registry:
 # ─── Fast Path ───
 # For high-confidence simple requests, skip the multi-worker deep panel
 # and use a single model from model_registry directly.
+#
+# tool_capable_models: Models that support Ollama's tool-calling API.
+# This list is used by BOTH fast path AND deep panel workers.
+# Models NOT listed here will be called without tools (run_model_once)
+# to avoid Ollama 400 "does not support tools" errors.
+# Do NOT add: deepseek-r1:32b, llava:34b, deepseek-coder-v2:16b
 fast_path:
   enabled: true
   confidence_threshold: 0.88   # only fast-path when router is very sure
   tool_capable_models:
+    # Cloud models
     - "qwen3.5:397b-cloud"
     - "deepseek-v3.2:cloud"
     - "kimi-k2.5:cloud"
     - "glm-5.1:cloud"
     - "cogito-2.1:671b-cloud"
     - "nemotron-3-super:cloud"
+    # Local models
     - "qwen3.5:35b-a3b"
     - "gemma4:31b"
     - "qwen3-coder-next:latest"
     - "qwen2.5-coder:32b"
     - "llama4:latest"
+    - "glm-4.7-flash:q8_0"
+    - "devstral-small-2:latest"
+    - "qwen3-vl:32b"
 
 # ─── Deep Panel (auto — mixed cloud + local workers) ───
 deep_panel:

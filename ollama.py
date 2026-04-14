@@ -7,12 +7,13 @@ model runners with optional tool-calling support.
 
 import json
 import logging
+import traceback
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import aiohttp
 
 import state
-from config import OLLAMA_BASE_URL, TOOLS_ENABLED, is_cloud_model
+from config import OLLAMA_BASE_URL, TOOL_CAPABLE_MODELS, TOOLS_ENABLED, is_cloud_model
 from helpers import timeout_for_model
 
 logger = logging.getLogger("audrey.ollama")
@@ -177,8 +178,23 @@ async def run_model_with_tools(
     frequency_penalty: Optional[float] = None,
     presence_penalty: Optional[float] = None,
 ) -> str:
-    """Run a model with tool-calling support via the tool registry."""
-    if not TOOLS_ENABLED or not state.tool_registry or not state.tool_registry.has_tools:
+    """Run a model with tool-calling support via the tool registry.
+
+    Falls back to run_model_once when:
+      - Tools are globally disabled
+      - The tool registry has no tools
+      - The model is not in the TOOL_CAPABLE_MODELS set
+    """
+    # ── Gate: skip tools entirely for non-capable models ──
+    model_supports_tools = model in TOOL_CAPABLE_MODELS
+    if (
+        not TOOLS_ENABLED
+        or not state.tool_registry
+        or not state.tool_registry.has_tools
+        or not model_supports_tools
+    ):
+        if not model_supports_tools and TOOLS_ENABLED:
+            logger.debug("Model %s not in TOOL_CAPABLE_MODELS — skipping tools", model)
         return await run_model_once(
             model, msgs,
             temperature=temperature, max_tokens=max_tokens, top_p=top_p,
@@ -197,5 +213,12 @@ async def run_model_with_tools(
             tools=tool_defs,
         )
 
-    content, _, _ = await state.tool_registry.run_with_tools(chat_fn, msgs)
-    return content
+    try:
+        content, _, _ = await state.tool_registry.run_with_tools(chat_fn, msgs)
+        return content
+    except Exception as e:
+        logger.error(
+            "run_model_with_tools failed for %s: %s\n%s",
+            model, e, traceback.format_exc(),
+        )
+        raise

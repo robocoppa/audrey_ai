@@ -7,6 +7,7 @@ plus the graph construction and compilation.
 
 import asyncio
 import logging
+import traceback
 from typing import Any, Dict, List
 
 from langgraph.graph import END, StateGraph
@@ -224,7 +225,9 @@ async def node_parallel_generate(s):
             }
         except Exception as e:
             note_model_failure(wn)
-            logger.warning("Worker %s failed: %s", wn, e)
+            logger.warning(
+                "Worker %s failed: %s\n%s", wn, e, traceback.format_exc()
+            )
             return {
                 "model": wn,
                 "content": "[WORKER_ERROR] Unable to respond.",
@@ -400,8 +403,21 @@ def build_deep_graph(include_synthesis: bool = True):
     return g.compile()
 
 
+def _should_run_react(s) -> str:
+    """Conditional edge: run ReAct agent only when fast path is active."""
+    if s.get("use_fast_path") and s.get("fast_model"):
+        return "react_agent"
+    return "escalate"
+
+
 def build_fast_graph():
-    """Build the fast path with ReAct agent + adaptive escalation."""
+    """Build the fast path with ReAct agent + adaptive escalation.
+
+    Uses a conditional edge after web_search so that react_agent is
+    only invoked when classify actually selected a fast model.
+    Previously, react_agent always ran and would crash with
+    'model is required' when fast_model was blank.
+    """
     g = StateGraph(AudreyState)
     for n, f in [
         ("classify", node_classify),
@@ -412,7 +428,11 @@ def build_fast_graph():
         g.add_node(n, f)
     g.set_entry_point("classify")
     g.add_edge("classify", "web_search")
-    g.add_edge("web_search", "react_agent")
+    g.add_conditional_edges(
+        "web_search",
+        _should_run_react,
+        {"react_agent": "react_agent", "escalate": "escalate"},
+    )
     g.add_edge("react_agent", "escalate")
     g.add_edge("escalate", END)
     return g.compile()

@@ -72,7 +72,17 @@ async def stream_fast_path(s: Dict[str, Any]) -> AsyncGenerator[str, None]:
     ct = int(time.time())
     rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     mn = s["requested_model"]
-    model = s["fast_model"]
+    model = s.get("fast_model", "")
+
+    # Guard: if fast_model is blank, yield error and bail
+    if not model:
+        logger.warning("stream_fast_path called with empty fast_model — skipping")
+        yield _sc(rid, ct, mn, "[Fast path error: no model selected. Falling back.]\n")
+        yield (
+            f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': mn, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+        )
+        yield "data: [DONE]\n\n"
+        return
 
     if EMIT_STATUS_UPDATES:
         yield _sc(rid, ct, mn, f"⚡ Fast path (ReAct): {model}\n\n")

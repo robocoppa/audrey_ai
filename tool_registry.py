@@ -15,6 +15,7 @@ v2: Added context compression for multi-round tool loops, tool result tracking,
 import json
 import logging
 import re
+import traceback
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import aiohttp
@@ -483,13 +484,39 @@ class ToolRegistry:
                 current = compress_tool_context(current)
 
             data = await chat_fn(current)
+
+            # ── Defensive: validate response shape ──
+            if not isinstance(data, dict) or "message" not in data:
+                logger.error(
+                    "Unexpected Ollama response shape (type=%s, keys=%s): %s",
+                    type(data).__name__,
+                    list(data.keys()) if isinstance(data, dict) else "N/A",
+                    str(data)[:500],
+                )
+                raise RuntimeError(
+                    f"Unexpected Ollama response: expected dict with 'message' key, "
+                    f"got {type(data).__name__}"
+                )
+
             msg = data["message"]
             tool_calls = msg.get("tool_calls")
 
+            # ── No tool calls → return text content ──
             if not tool_calls:
                 content = msg.get("content", "")
                 if not content or not content.strip():
                     raise RuntimeError("Model returned empty content")
+                return content, current, tool_calls_log
+
+            # ── Validate tool_calls is actually a list ──
+            if not isinstance(tool_calls, list):
+                logger.warning(
+                    "tool_calls is %s, not list — treating as no-tool response",
+                    type(tool_calls).__name__,
+                )
+                content = msg.get("content", "")
+                if not content or not content.strip():
+                    raise RuntimeError("Model returned non-list tool_calls and empty content")
                 return content, current, tool_calls_log
 
             logger.info(
@@ -503,19 +530,48 @@ class ToolRegistry:
             })
 
             for tc in tool_calls:
+                # ── Defensive: validate each tool call structure ──
+                if not isinstance(tc, dict):
+                    logger.warning("Skipping non-dict tool_call: %s", type(tc).__name__)
+                    current.append({"role": "tool", "content": '{"error": "malformed tool call"}'})
+                    continue
+
                 func = tc.get("function", {})
+                if not isinstance(func, dict):
+                    logger.warning("Skipping non-dict function in tool_call: %s", type(func).__name__)
+                    current.append({"role": "tool", "content": '{"error": "malformed function"}'})
+                    continue
+
                 name = func.get("name", "")
                 args = func.get("arguments", {})
+
+                # ── Defensive: ensure args is a dict ──
                 if isinstance(args, str):
                     try:
                         args = json.loads(args)
                     except json.JSONDecodeError:
+                        logger.warning("Failed to parse tool args string: %s", args[:200])
                         args = {}
+                if not isinstance(args, dict):
+                    logger.warning(
+                        "Tool args for %s is %s (not dict) — wrapping or skipping. Value: %s",
+                        name, type(args).__name__, str(args)[:200],
+                    )
+                    # Some models return a list; try to handle gracefully
+                    args = {}
 
                 logger.info(
                     "  → %s(%s)", name, json.dumps(args, default=str)[:200],
                 )
-                result = await self.execute(name, args)
+                try:
+                    result = await self.execute(name, args)
+                except Exception as exc:
+                    logger.error(
+                        "Tool execute failed for %s: %s\n%s",
+                        name, exc, traceback.format_exc(),
+                    )
+                    result = json.dumps({"error": f"Tool execution failed: {exc}"})
+
                 current.append({"role": "tool", "content": result})
 
                 # Track for observability
@@ -531,8 +587,9 @@ class ToolRegistry:
         if compress_enabled:
             current = compress_tool_context(current)
         data = await chat_fn(current)
+        msg = data.get("message", {}) if isinstance(data, dict) else {}
         return (
-            data["message"].get("content", "") or "[Tool rounds exhausted]",
+            msg.get("content", "") or "[Tool rounds exhausted]",
             current,
             tool_calls_log,
         )

@@ -22,6 +22,7 @@ from config import (
     REFLECTION_ENABLED,
     REFLECTION_MAX_RETRIES,
     ROUTER_MODEL,
+    TOOL_CAPABLE_MODELS,
     TOOLS_ENABLED,
 )
 from health import note_model_failure, note_model_success
@@ -179,7 +180,20 @@ Be thorough but efficient — use tools only when they add value."""
 
 
 async def run_react_agent(s: Dict[str, Any]) -> Dict[str, Any]:
-    """ReAct loop — think, act, observe, repeat."""
+    """ReAct loop — think, act, observe, repeat.
+
+    Guards:
+      - If use_fast_path is False or fast_model is blank, short-circuit
+        (the fast graph always runs this node, so we must bail early when
+        classify decided against fast path).
+      - Only sends tools if the model is in TOOL_CAPABLE_MODELS.
+    """
+    # ── Guard: skip if fast path wasn't selected ──
+    if not s.get("use_fast_path") or not s.get("fast_model"):
+        logger.debug("react_agent skipped: use_fast_path=%s fast_model='%s'",
+                      s.get("use_fast_path"), s.get("fast_model"))
+        return s
+
     model = s["fast_model"]
     task_prompt = role_prompt(s["task_type"], model)
 
@@ -190,7 +204,14 @@ async def run_react_agent(s: Dict[str, Any]) -> Dict[str, Any]:
     msgs = [sys_msg, *s["messages"]]
 
     try:
-        if TOOLS_ENABLED and state.tool_registry and state.tool_registry.has_tools:
+        model_can_use_tools = (
+            TOOLS_ENABLED
+            and model in TOOL_CAPABLE_MODELS
+            and state.tool_registry
+            and state.tool_registry.has_tools
+        )
+
+        if model_can_use_tools:
             tool_defs = state.tool_registry.tool_definitions
 
             async def chat_fn(current_msgs):

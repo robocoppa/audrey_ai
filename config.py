@@ -67,7 +67,10 @@ BRAVE_MAX_RESULTS = int(os.getenv("BRAVE_MAX_RESULTS", "5"))
 # ── Fast-path knobs ──────────────────────────────────────────────────────────
 FAST_PATH_ENABLED = FAST_PATH_CONFIG.get("enabled", True)
 FAST_PATH_CONFIDENCE = FAST_PATH_CONFIG.get("confidence_threshold", 0.88)
-FAST_PATH_TOOL_MODELS: Set[str] = set(FAST_PATH_CONFIG.get("tool_capable_models", []))
+# Models that support Ollama tool-calling.  Used by both fast path and deep
+# panel to decide whether to send tools in the payload.  Models NOT in this
+# set are called via run_model_once (no tools) to avoid Ollama 400 errors.
+TOOL_CAPABLE_MODELS: Set[str] = set(FAST_PATH_CONFIG.get("tool_capable_models", []))
 FAST_PATH_TIMEOUT = int(TIMEOUTS.get("fast_path", 180))
 
 # ── Complexity gate ──────────────────────────────────────────────────────────
