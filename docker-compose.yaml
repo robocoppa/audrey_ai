@@ -56,7 +56,7 @@ services:
     networks:
       - ollama-net
     labels:
-      - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/search.jpg
+      - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/search.png
 
   # ── Custom tool server ──
   custom-tools:
@@ -81,7 +81,7 @@ services:
     networks:
       - ollama-net
     labels:
-      - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/toolbox.jpg
+      - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/toolbox.png
 
 networks:
   ollama-net:
