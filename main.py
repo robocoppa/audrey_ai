@@ -340,12 +340,47 @@ _GP = [
     re.compile(r"^(translate|summarize|summarise|paraphrase|rewrite|rephrase)\b", re.I),
 ]
 
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ FIX 5: Review/analysis override — reclassify code → reasoning when     │
+# │ the user's actual question is asking for review, suggestions, or       │
+# │ analysis of code rather than writing/debugging code.                   │
+# └─────────────────────────────────────────────────────────────────────────┘
+_REVIEW_OVERRIDE = re.compile(
+    r"\b(review|suggest|suggestion|feedback|improve|improvement|critique|analyze|"
+    r"analyse|opinion|thoughts|what do you think|look over|check over|go over|"
+    r"assess|evaluate|audit|refactor suggestions|best practices|code review|"
+    r"code quality|clean up|improvements|recommendations|optimize this|"
+    r"any issues|anything wrong|what can be better|how can .{0,20} improv|"
+    r"give me .{0,20} feedback|tell me .{0,20} about this)\b",
+    re.I,
+)
 
-def keyword_prefilter(text):
-    """Expanded keyword pre-filter — catches more patterns to reduce router calls."""
+
+def keyword_prefilter(text, *, user_text=None):
+    """Expanded keyword pre-filter — catches more patterns to reduce router calls.
+
+    Args:
+        text: The text to classify (last user message preferred).
+        user_text: If provided, used for the review/analysis override check.
+                   When code signals come from pasted code but the user's actual
+                   question is asking for review/analysis, reclassify as reasoning.
+    """
+    # Check for review/analysis intent FIRST using the user's actual question.
+    # This catches "here's my code, give me suggestions" before the backtick
+    # pattern fires and misroutes it as a code-writing task.
+    override_text = user_text or text
+    is_review_request = bool(_REVIEW_OVERRIDE.search(override_text))
+
     # Strong code signals
     for p in _CS:
         if p.search(text):
+            if is_review_request:
+                return {
+                    "task_type": "reasoning",
+                    "confidence": 0.85,
+                    "needs_vision": False,
+                    "route_reason": f"Keyword (code+review override): {p.pattern[:40]} → reasoning",
+                }
             return {
                 "task_type": "code",
                 "confidence": 0.92,
@@ -355,6 +390,13 @@ def keyword_prefilter(text):
     # Weak code signals (need 2+)
     w = [p for p in _CW if p.search(text)]
     if len(w) >= 2:
+        if is_review_request:
+            return {
+                "task_type": "reasoning",
+                "confidence": 0.82,
+                "needs_vision": False,
+                "route_reason": f"Keyword (weak code x{len(w)}+review override) → reasoning",
+            }
         return {
             "task_type": "code",
             "confidence": 0.85,
@@ -820,8 +862,17 @@ async def classify_request(msgs):
             "needs_vision": True,
             "route_reason": "Image detected.",
         }
+    # ┌─────────────────────────────────────────────────────────────────────────┐
+    # │ FIX 5: Run keyword pre-filter on the LAST USER MESSAGE, not the full   │
+    # │ flattened conversation. This prevents pasted code blocks from           │
+    # │ dominating classification when the user's actual question is different. │
+    # │ The full conversation is still passed to the router model for context.  │
+    # └─────────────────────────────────────────────────────────────────────────┘
+    user_text = get_last_user_text(msgs)
     flat = flatten_messages(msgs)
-    kw = keyword_prefilter(flat)
+    # Pre-filter on user's actual question; pass full flat text as fallback
+    # for the review override check (in case the user text is very short).
+    kw = keyword_prefilter(user_text or flat, user_text=user_text)
     if kw:
         return kw
 
