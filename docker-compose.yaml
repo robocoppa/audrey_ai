@@ -55,6 +55,8 @@ services:
     cap_add: [CHOWN, SETGID, SETUID]
     networks:
       - ollama-net
+    labels:
+      - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/search.jpg
 
   # ── Custom tool server ──
   custom-tools:
@@ -78,6 +80,8 @@ services:
       - searxng
     networks:
       - ollama-net
+    labels:
+      - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/toolbox.jpg
 
 networks:
   ollama-net:
