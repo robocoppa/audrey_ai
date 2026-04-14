@@ -1,26 +1,25 @@
-# Tool services — add to your existing docker-compose or run standalone.
-# These are the support services Audrey discovers via OpenAPI.
+# Tool services only — for running the orchestrator outside Docker.
 #
 #   docker compose -f docker-compose.tools.yaml up -d
-#
-# Audrey connects to these via the URLs in config.yaml tool_servers.
 
 services:
-  # ── SearXNG (replaces Brave — zero API keys) ──
+  # ── SearXNG ──
   searxng:
     image: searxng/searxng:latest
     container_name: searxng
     restart: unless-stopped
     ports:
-      - "8081:8081"
+      - "${SEARXNG_PORT:-8081}:8080"
     volumes:
       - ./searxng:/etc/searxng:rw
     environment:
-      - SEARXNG_BASE_URL=http://localhost:8081
+      - SEARXNG_BASE_URL=http://localhost:8080
     cap_drop: [ALL]
     cap_add: [CHOWN, SETGID, SETUID]
+    networks:
+      - ollama-net
 
-  # ── Custom tool server (search, memory, python, sysmon, filesystem, SQL, docs) ──
+  # ── Custom tool server ──
   custom-tools:
     build:
       context: .
@@ -28,9 +27,9 @@ services:
     container_name: custom-tools
     restart: unless-stopped
     ports:
-      - "8001:8001"
+      - "${TOOLS_PORT:-8001}:8001"
     environment:
-      - SEARXNG_URL=http://searxng:8081
+      - SEARXNG_URL=http://searxng:8080
       - TOOLS_SANDBOX_DIR=/app/sandbox
       - TOOLS_MEMORY_DB=/app/data/memory.db
       - TOOLS_SQL_DB=/app/data/local.db
@@ -40,6 +39,12 @@ services:
       - tools-sandbox:/app/sandbox
     depends_on:
       - searxng
+    networks:
+      - ollama-net
+
+networks:
+  ollama-net:
+    external: true
 
 volumes:
   tools-data:

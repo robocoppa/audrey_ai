@@ -5,15 +5,15 @@
 # Requires Ollama running on the host (or adjust OLLAMA_BASE_URL).
 
 services:
-  # ── Audrey ──
-  audrey:
+  # ── Orchestrator ──
+  orchestrator:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: audrey-ai
     restart: unless-stopped
     ports:
-      - "${AUDREY_PORT:-8000}:8000"
+      - "${ORCHESTRATOR_PORT:-8000}:8000"
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - ROUTER_MODEL=${ROUTER_MODEL:-qwen3:4b}
@@ -24,7 +24,7 @@ services:
       - API_KEY=${API_KEY:-}
       - TOOLS_ENABLED=${TOOLS_ENABLED:-true}
       - SEARCH_BACKEND=${SEARCH_BACKEND:-searxng}
-      - SEARXNG_URL=http://searxng:8081
+      - SEARXNG_URL=http://searxng:8080
       - BRAVE_API_KEY=${BRAVE_API_KEY:-}
       - EMIT_ROUTING_BANNER=${EMIT_ROUTING_BANNER:-true}
       - EMIT_STATUS_UPDATES=${EMIT_STATUS_UPDATES:-true}
@@ -34,6 +34,8 @@ services:
     depends_on:
       - searxng
       - custom-tools
+    networks:
+      - ollama-net
 
   # ── SearXNG (local web search — no API keys) ──
   searxng:
@@ -41,13 +43,16 @@ services:
     container_name: searxng
     restart: unless-stopped
     ports:
-      - "${SEARXNG_PORT:-8081}:8081"
+      # Host port is configurable; internal stays 8080
+      - "${SEARXNG_PORT:-8081}:8080"
     volumes:
       - ./searxng:/etc/searxng:rw
     environment:
-      - SEARXNG_BASE_URL=http://localhost:8081
+      - SEARXNG_BASE_URL=http://localhost:8080
     cap_drop: [ALL]
     cap_add: [CHOWN, SETGID, SETUID]
+    networks:
+      - ollama-net
 
   # ── Custom tool server ──
   custom-tools:
@@ -59,7 +64,7 @@ services:
     ports:
       - "${TOOLS_PORT:-8001}:8001"
     environment:
-      - SEARXNG_URL=http://searxng:8081
+      - SEARXNG_URL=http://searxng:8080
       - TOOLS_SANDBOX_DIR=/app/sandbox
       - TOOLS_MEMORY_DB=/app/data/memory.db
       - TOOLS_SQL_DB=/app/data/local.db
@@ -69,6 +74,12 @@ services:
       - tools-sandbox:/app/sandbox
     depends_on:
       - searxng
+    networks:
+      - ollama-net
+
+networks:
+  ollama-net:
+    external: true
 
 volumes:
   tools-data:
