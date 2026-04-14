@@ -6,7 +6,7 @@ every endpoint into an Ollama-compatible tool definition, and dispatches
 model tool calls to the correct server via HTTP.
 
 Adding a new tool = spinning up a new OpenAPI server + adding its URL to config.
-Zero code changes in the orchestrator.
+Zero code changes in Audrey's main codebase.
 
 v2: Added context compression for multi-round tool loops, tool result tracking,
     and support for the ReAct agent pattern.
@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import aiohttp
 
-logger = logging.getLogger("orchestrator.registry")
+logger = logging.getLogger("audrey.registry")
 
 MAX_TOOL_ROUNDS = int(os.getenv("MAX_TOOL_ROUNDS", "5"))
 COMPRESS_AFTER_ROUNDS = int(os.getenv("COMPRESS_AFTER_ROUNDS", "2"))

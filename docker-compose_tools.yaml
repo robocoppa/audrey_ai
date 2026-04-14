@@ -1,6 +1,6 @@
-# Tool services only — for running the orchestrator outside Docker.
+# Tool services only — for running Audrey outside Docker.
 #
-#   docker compose -f docker-compose.tools.yaml up -d
+#   docker compose -f docker-compose_tools.yaml up -d
 
 services:
   # ── SearXNG ──
