@@ -14,17 +14,18 @@ v2: Added context compression for multi-round tool loops, tool result tracking,
 
 import json
 import logging
-import os
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import aiohttp
 
+from config import MAX_TOOL_ROUNDS, REACT_COMPRESS_AFTER, REACT_COMPRESS_MAX_CHARS
+
 logger = logging.getLogger("audrey.registry")
 
-MAX_TOOL_ROUNDS = int(os.getenv("MAX_TOOL_ROUNDS", "5"))
-COMPRESS_AFTER_ROUNDS = int(os.getenv("COMPRESS_AFTER_ROUNDS", "2"))
-COMPRESS_MAX_RESULT_CHARS = int(os.getenv("COMPRESS_MAX_RESULT_CHARS", "2000"))
+# Re-export under the names used throughout this module
+COMPRESS_AFTER_ROUNDS = REACT_COMPRESS_AFTER
+COMPRESS_MAX_RESULT_CHARS = REACT_COMPRESS_MAX_CHARS
 
 
 # ── ToolServer ───────────────────────────────────────────────────────────────

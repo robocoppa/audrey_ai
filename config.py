@@ -29,6 +29,15 @@ TIMEOUTS: Dict[str, int] = _config.get("timeouts", {})
 CACHE_CONFIG: Dict[str, Any] = _config.get("cache", {})
 FAST_PATH_CONFIG: Dict[str, Any] = _config.get("fast_path", {})
 TOOL_SERVER_URLS: List[str] = _config.get("tool_servers", [])
+AGENTIC_CONFIG: Dict[str, Any] = _config.get("agentic", {})
+SEARCH_CONFIG: Dict[str, Any] = _config.get("search", {})
+TOOLS_CONFIG: Dict[str, Any] = _config.get("tools", {})
+
+# ── Agentic sub-sections (for cleaner access below) ─────────────────────────
+_AGENTIC_REACT: Dict[str, Any] = AGENTIC_CONFIG.get("react", {})
+_AGENTIC_PLANNING: Dict[str, Any] = AGENTIC_CONFIG.get("planning", {})
+_AGENTIC_REFLECTION: Dict[str, Any] = AGENTIC_CONFIG.get("reflection", {})
+_AGENTIC_ESCALATION: Dict[str, Any] = AGENTIC_CONFIG.get("escalation", {})
 
 # ── Environment knobs ────────────────────────────────────────────────────────
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
@@ -44,10 +53,14 @@ DEEP_WORKER_TIMEOUT = int(
     os.getenv("DEEP_WORKER_TIMEOUT", str(TIMEOUTS.get("deep_worker", 240)))
 )
 API_KEY = os.getenv("API_KEY", "")
-TOOLS_ENABLED = os.getenv("TOOLS_ENABLED", "true").lower() == "true"
-SEARCH_BACKEND = os.getenv("SEARCH_BACKEND", "searxng")
+TOOLS_ENABLED = os.getenv(
+    "TOOLS_ENABLED", str(TOOLS_CONFIG.get("enabled", True))
+).lower() in ("true", "1", "yes")
+SEARCH_BACKEND = os.getenv("SEARCH_BACKEND", SEARCH_CONFIG.get("backend", "searxng"))
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8080")
-SEARXNG_MAX_RESULTS = int(os.getenv("SEARXNG_MAX_RESULTS", "5"))
+SEARXNG_MAX_RESULTS = int(os.getenv(
+    "SEARXNG_MAX_RESULTS", str(SEARCH_CONFIG.get("max_results", 5))
+))
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
 BRAVE_MAX_RESULTS = int(os.getenv("BRAVE_MAX_RESULTS", "5"))
 
@@ -63,17 +76,40 @@ FAST_PATH_TIMEOUT = int(TIMEOUTS.get("fast_path", 180))
 COMPLEXITY_FORCE_DEEP = os.getenv("COMPLEXITY_FORCE_DEEP", "true").lower() == "true"
 COMPLEXITY_TOKEN_THRESHOLD = int(os.getenv("COMPLEXITY_TOKEN_THRESHOLD", "500"))
 
-# ── Agentic knobs ────────────────────────────────────────────────────────────
-REACT_MAX_ROUNDS = int(os.getenv("REACT_MAX_ROUNDS", "3"))
-REFLECTION_ENABLED = os.getenv("REFLECTION_ENABLED", "true").lower() == "true"
-PLANNING_ENABLED = os.getenv("PLANNING_ENABLED", "true").lower() == "true"
-PLANNING_MIN_TOKENS = int(os.getenv("PLANNING_MIN_TOKENS", "40"))
-ESCALATION_ENABLED = os.getenv("ESCALATION_ENABLED", "true").lower() == "true"
-ESCALATION_MIN_LENGTH = int(os.getenv("ESCALATION_MIN_LENGTH", "100"))
-ESCALATION_CONFIDENCE_CEILING = float(
-    os.getenv("ESCALATION_CONFIDENCE_CEILING", "0.95")
-)
-REFLECTION_MAX_RETRIES = int(os.getenv("REFLECTION_MAX_RETRIES", "1"))
+# ── Agentic knobs (YAML defaults, env var overrides) ────────────────────────
+REACT_MAX_ROUNDS = int(os.getenv(
+    "REACT_MAX_ROUNDS", str(_AGENTIC_REACT.get("max_rounds", 3))
+))
+REACT_COMPRESS_AFTER = int(os.getenv(
+    "COMPRESS_AFTER_ROUNDS", str(_AGENTIC_REACT.get("compress_after_rounds", 2))
+))
+REACT_COMPRESS_MAX_CHARS = int(os.getenv(
+    "COMPRESS_MAX_RESULT_CHARS", str(_AGENTIC_REACT.get("compress_max_result_chars", 2000))
+))
+REFLECTION_ENABLED = os.getenv(
+    "REFLECTION_ENABLED", str(_AGENTIC_REFLECTION.get("enabled", True))
+).lower() in ("true", "1", "yes")
+REFLECTION_MAX_RETRIES = int(os.getenv(
+    "REFLECTION_MAX_RETRIES", str(_AGENTIC_REFLECTION.get("max_retries", 1))
+))
+PLANNING_ENABLED = os.getenv(
+    "PLANNING_ENABLED", str(_AGENTIC_PLANNING.get("enabled", True))
+).lower() in ("true", "1", "yes")
+PLANNING_MIN_TOKENS = int(os.getenv(
+    "PLANNING_MIN_TOKENS", str(_AGENTIC_PLANNING.get("min_tokens", 40))
+))
+ESCALATION_ENABLED = os.getenv(
+    "ESCALATION_ENABLED", str(_AGENTIC_ESCALATION.get("enabled", True))
+).lower() in ("true", "1", "yes")
+ESCALATION_MIN_LENGTH = int(os.getenv(
+    "ESCALATION_MIN_LENGTH", str(_AGENTIC_ESCALATION.get("min_response_length", 100))
+))
+ESCALATION_CONFIDENCE_CEILING = float(os.getenv(
+    "ESCALATION_CONFIDENCE_CEILING", str(_AGENTIC_ESCALATION.get("confidence_ceiling", 0.95))
+))
+MAX_TOOL_ROUNDS = int(os.getenv(
+    "MAX_TOOL_ROUNDS", str(TOOLS_CONFIG.get("max_tool_rounds", 5))
+))
 
 # ── Cache knobs ──────────────────────────────────────────────────────────────
 CACHE_ENABLED = CACHE_CONFIG.get("enabled", True)
