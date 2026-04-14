@@ -28,7 +28,7 @@ logger = logging.getLogger("custom-tools")
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
-SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8080")
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8081")
 SEARXNG_MAX_RESULTS = int(os.getenv("SEARXNG_MAX_RESULTS", "5"))
 SANDBOX_DIR = os.getenv("TOOLS_SANDBOX_DIR", "/app/sandbox")
 MEMORY_DB = os.getenv("TOOLS_MEMORY_DB", "/app/data/memory.db")

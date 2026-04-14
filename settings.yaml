@@ -4,9 +4,9 @@
 use_default_settings: true
 
 server:
-  secret_key: "change-me-to-a-random-string"
+  secret_key: "XZTntIaJE4h6Gf7S9fhZ6Fb423GDSh"
   bind_address: "0.0.0.0"
-  port: 8080
+  port: 8081
 
 search:
   safe_search: 0

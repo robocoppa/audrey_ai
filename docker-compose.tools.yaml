@@ -12,11 +12,11 @@ services:
     container_name: searxng
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8081:8081"
     volumes:
       - ./searxng:/etc/searxng:rw
     environment:
-      - SEARXNG_BASE_URL=http://localhost:8080
+      - SEARXNG_BASE_URL=http://localhost:8081
     cap_drop: [ALL]
     cap_add: [CHOWN, SETGID, SETUID]
 
@@ -30,7 +30,7 @@ services:
     ports:
       - "8001:8001"
     environment:
-      - SEARXNG_URL=http://searxng:8080
+      - SEARXNG_URL=http://searxng:8081
       - TOOLS_SANDBOX_DIR=/app/sandbox
       - TOOLS_MEMORY_DB=/app/data/memory.db
       - TOOLS_SQL_DB=/app/data/local.db
