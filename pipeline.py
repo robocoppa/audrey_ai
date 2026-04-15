@@ -364,9 +364,14 @@ async def node_parallel_generate(s):
     cloud_tasks = [(w, t) for w, t in assignments if is_cloud_model(w)]
     local_tasks = [(w, t) for w, t in assignments if not is_cloud_model(w)]
 
-    async def run_local():
+    async def run_local(sequential: bool = False):
         if not local_tasks:
             return []
+        if sequential:
+            results = []
+            for w, t in local_tasks:
+                results.append(await one(w, t))
+            return results
         return list(await asyncio.gather(*[one(w, t) for w, t in local_tasks]))
 
     if cloud_tasks and local_tasks:
@@ -378,7 +383,7 @@ async def node_parallel_generate(s):
     elif cloud_tasks:
         outs = list(await asyncio.gather(*[one(w, t) for w, t in cloud_tasks]))
     elif local_tasks:
-        outs = await run_local()
+        outs = await run_local(sequential=True)
     else:
         outs = []
 
