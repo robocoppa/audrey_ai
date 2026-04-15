@@ -1,14 +1,84 @@
 """
 Audrey — helper utilities.
 
-Message manipulation, token estimation, datetime injection, worker role prompts.
+Message manipulation, request state helpers, token estimation, datetime
+injection, and worker role prompts.
 """
 
+import time
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from config import TIMEOUTS, is_cloud_model
+
+
+# ── Request state / model options ────────────────────────────────────────────
+
+def ensure_state_defaults(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Populate optional state fields used across fast and deep flows."""
+    state.setdefault("errors", [])
+    state.setdefault("prompt_tokens", 0)
+    state.setdefault("completion_tokens", 0)
+    state.setdefault("search_performed", False)
+    state.setdefault("search_query", "")
+    state.setdefault("search_results", [])
+    state.setdefault("use_fast_path", False)
+    state.setdefault("fast_model", "")
+    state.setdefault("sub_tasks", None)
+    state.setdefault("react_rounds", 0)
+    state.setdefault("reflection_result", {})
+    state.setdefault("reflection_retries", 0)
+    state.setdefault("escalated", False)
+    state.setdefault("tools_used", [])
+    state.setdefault("is_code_review", False)
+    return state
+
+
+def build_initial_state(
+    *,
+    request_id: str,
+    requested_model: str,
+    messages: List[Dict[str, Any]],
+    stream: bool,
+    temperature: float,
+    max_tokens: Optional[int],
+    top_p: Optional[float],
+    stop: Optional[Any],
+    frequency_penalty: Optional[float],
+    presence_penalty: Optional[float],
+) -> Dict[str, Any]:
+    """Build the shared initial pipeline state for a request."""
+    state = {
+        "request_id": request_id,
+        "requested_model": requested_model,
+        "messages": messages,
+        "stream": stream,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "top_p": top_p,
+        "stop": stop,
+        "frequency_penalty": frequency_penalty,
+        "presence_penalty": presence_penalty,
+        "started_at": time.time(),
+    }
+    return ensure_state_defaults(state)
+
+
+def model_call_kwargs(
+    state: Dict[str, Any],
+    *,
+    temperature: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Shared generation kwargs for model calls."""
+    return {
+        "temperature": state["temperature"] if temperature is None else temperature,
+        "max_tokens": state.get("max_tokens"),
+        "top_p": state.get("top_p"),
+        "stop": state.get("stop"),
+        "frequency_penalty": state.get("frequency_penalty"),
+        "presence_penalty": state.get("presence_penalty"),
+    }
 
 
 # ── Timeout for a model ──────────────────────────────────────────────────────

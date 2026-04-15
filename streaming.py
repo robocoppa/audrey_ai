@@ -13,7 +13,7 @@ from typing import Any, AsyncGenerator, Dict
 
 from config import EMIT_ROUTING_BANNER, EMIT_STATUS_UPDATES
 from health import note_model_failure, note_model_success
-from helpers import role_prompt
+from helpers import model_call_kwargs, role_prompt
 from ollama import ollama_chat_stream
 from agents import _REACT_SYSTEM
 
@@ -112,12 +112,7 @@ async def stream_fast_path(s: Dict[str, Any]) -> AsyncGenerator[str, None]:
         async for item in ollama_chat_stream(
             model,
             msgs,
-            temperature=s["temperature"],
-            max_tokens=s.get("max_tokens"),
-            top_p=s.get("top_p"),
-            stop=s.get("stop"),
-            frequency_penalty=s.get("frequency_penalty"),
-            presence_penalty=s.get("presence_penalty"),
+            **model_call_kwargs(s),
         ):
             msg = item.get("message") or {}
             c = msg.get("content", "")
@@ -166,12 +161,7 @@ async def stream_synthesis(ps: Dict[str, Any]) -> AsyncGenerator[str, None]:
             async for item in ollama_chat_stream(
                 s,
                 ps["synthesis_messages"],
-                temperature=min(ps["temperature"], 0.3),
-                max_tokens=ps.get("max_tokens"),
-                top_p=ps.get("top_p"),
-                stop=ps.get("stop"),
-                frequency_penalty=ps.get("frequency_penalty"),
-                presence_penalty=ps.get("presence_penalty"),
+                **model_call_kwargs(ps, temperature=min(ps["temperature"], 0.3)),
             ):
                 msg = item.get("message") or {}
                 c = msg.get("content", "")

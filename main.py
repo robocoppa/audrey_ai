@@ -41,6 +41,7 @@ from config import (
     is_cloud_model,
 )
 from helpers import estimate_tokens, flatten_messages
+from helpers import build_initial_state
 from models import ChatCompletionRequest
 from pipeline import (
     FAST_GRAPH,
@@ -271,33 +272,18 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
                 "escalated": False,
             }
 
-    s = {
-        "request_id": str(uuid.uuid4()),
-        "requested_model": req.model,
-        "messages": msgs_raw,
-        "stream": bool(req.stream),
-        "temperature": temp,
-        "max_tokens": req.max_tokens,
-        "top_p": req.top_p,
-        "stop": req.stop,
-        "frequency_penalty": req.frequency_penalty,
-        "presence_penalty": req.presence_penalty,
-        "errors": [],
-        "started_at": time.time(),
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "search_performed": False,
-        "search_query": "",
-        "search_results": [],
-        "use_fast_path": False,
-        "fast_model": "",
-        "sub_tasks": None,
-        "react_rounds": 0,
-        "reflection_result": {},
-        "reflection_retries": 0,
-        "escalated": False,
-        "tools_used": [],
-    }
+    s = build_initial_state(
+        request_id=str(uuid.uuid4()),
+        requested_model=req.model,
+        messages=msgs_raw,
+        stream=bool(req.stream),
+        temperature=temp,
+        max_tokens=req.max_tokens,
+        top_p=req.top_p,
+        stop=req.stop,
+        frequency_penalty=req.frequency_penalty,
+        presence_penalty=req.presence_penalty,
+    )
 
     # Try fast path first for audrey_deep
     if (
@@ -396,37 +382,22 @@ async def chat_completions(req: ChatCompletionRequest):
             if EMIT_STATUS_UPDATES:
                 yield _sc(rid, ct, req.model, "🔍 Analyzing...\n")
 
-            init_state = {
-                "request_id": str(uuid.uuid4()),
-                "requested_model": req.model,
-                "messages": [m.model_dump() for m in req.messages],
-                "stream": True,
-                "temperature": (
+            init_state = build_initial_state(
+                request_id=str(uuid.uuid4()),
+                requested_model=req.model,
+                messages=[m.model_dump() for m in req.messages],
+                stream=True,
+                temperature=(
                     req.temperature
                     if req.temperature is not None
                     else DEFAULT_TEMPERATURE
                 ),
-                "max_tokens": req.max_tokens,
-                "top_p": req.top_p,
-                "stop": req.stop,
-                "frequency_penalty": req.frequency_penalty,
-                "presence_penalty": req.presence_penalty,
-                "errors": [],
-                "started_at": time.time(),
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "search_performed": False,
-                "search_query": "",
-                "search_results": [],
-                "use_fast_path": False,
-                "fast_model": "",
-                "sub_tasks": None,
-                "react_rounds": 0,
-                "reflection_result": {},
-                "reflection_retries": 0,
-                "escalated": False,
-                "tools_used": [],
-            }
+                max_tokens=req.max_tokens,
+                top_p=req.top_p,
+                stop=req.stop,
+                frequency_penalty=req.frequency_penalty,
+                presence_penalty=req.presence_penalty,
+            )
 
             # Classify (also initializes search fields and original_messages)
             classified = await node_classify(init_state)

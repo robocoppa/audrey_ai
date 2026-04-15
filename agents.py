@@ -30,6 +30,7 @@ from helpers import (
     estimate_tokens,
     flatten_messages,
     get_last_user_text,
+    model_call_kwargs,
     role_prompt,
 )
 from ollama import ollama_chat_once, run_model_once, run_model_with_tools
@@ -219,12 +220,7 @@ async def run_react_agent(s: Dict[str, Any]) -> Dict[str, Any]:
                 return await ollama_chat_once(
                     model,
                     current_msgs,
-                    temperature=s["temperature"],
-                    max_tokens=s.get("max_tokens"),
-                    top_p=s.get("top_p"),
-                    stop=s.get("stop"),
-                    frequency_penalty=s.get("frequency_penalty"),
-                    presence_penalty=s.get("presence_penalty"),
+                    **model_call_kwargs(s),
                     tools=tool_defs,
                 )
 
@@ -252,12 +248,7 @@ async def run_react_agent(s: Dict[str, Any]) -> Dict[str, Any]:
                 run_model_once(
                     model,
                     msgs,
-                    temperature=s["temperature"],
-                    max_tokens=s.get("max_tokens"),
-                    top_p=s.get("top_p"),
-                    stop=s.get("stop"),
-                    frequency_penalty=s.get("frequency_penalty"),
-                    presence_penalty=s.get("presence_penalty"),
+                    **model_call_kwargs(s),
                 ),
                 timeout=FAST_PATH_TIMEOUT,
             )
@@ -349,12 +340,7 @@ async def adaptive_escalate(s: Dict[str, Any]) -> Dict[str, Any]:
                         run_model_with_tools(
                             model,
                             retry_msgs,
-                            temperature=s["temperature"],
-                            max_tokens=s.get("max_tokens"),
-                            top_p=s.get("top_p"),
-                            stop=s.get("stop"),
-                            frequency_penalty=s.get("frequency_penalty"),
-                            presence_penalty=s.get("presence_penalty"),
+                            **model_call_kwargs(s),
                         ),
                         timeout=FAST_PATH_TIMEOUT,
                     )

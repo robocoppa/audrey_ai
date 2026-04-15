@@ -29,9 +29,11 @@ from config import (
 )
 from health import is_model_healthy, note_model_failure, note_model_success
 from helpers import (
+    ensure_state_defaults,
     estimate_tokens,
     flatten_messages,
     inject_datetime,
+    model_call_kwargs,
     role_prompt,
 )
 from models import AudreyState
@@ -42,27 +44,123 @@ logger = logging.getLogger("audrey.pipeline")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Worker selection helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def worker_limits_for_model(requested_model: str) -> tuple[int, int]:
+    """Return the independent cloud/local worker caps for a virtual model."""
+    if requested_model == "audrey_cloud":
+        return MAX_DEEP_WORKERS_CLOUD, 0
+    if requested_model == "audrey_local":
+        return 0, MAX_DEEP_WORKERS
+    return MAX_DEEP_WORKERS_CLOUD, MAX_DEEP_WORKERS
+
+
+def _fits_worker_bucket(
+    worker_name: str,
+    *,
+    cloud_count: int,
+    local_count: int,
+    max_cloud: int,
+    max_local: int,
+) -> bool:
+    if is_cloud_model(worker_name):
+        return cloud_count < max_cloud
+    return local_count < max_local
+
+
+def _is_worker_available(worker_name: str) -> bool:
+    if not is_model_healthy(worker_name):
+        logger.debug("Worker %s skipped: unhealthy (cooldown)", worker_name)
+        return False
+    if not is_cloud_model(worker_name) and worker_name not in state.available_models:
+        logger.debug("Worker %s skipped: not in available_models", worker_name)
+        return False
+    return True
+
+
+def _append_worker(
+    selected: List[str],
+    worker_name: str,
+    *,
+    cloud_count: int,
+    local_count: int,
+) -> tuple[int, int]:
+    selected.append(worker_name)
+    if is_cloud_model(worker_name):
+        return cloud_count + 1, local_count
+    return cloud_count, local_count + 1
+
+
+def select_workers(
+    requested_model: str,
+    all_workers: List[str],
+    *,
+    task_type: str,
+) -> List[str]:
+    """Select deep workers using caps, health, and availability gates."""
+    max_cloud, max_local = worker_limits_for_model(requested_model)
+
+    selected: List[str] = []
+    cloud_count = 0
+    local_count = 0
+
+    for worker_name in all_workers:
+        if not _fits_worker_bucket(
+            worker_name,
+            cloud_count=cloud_count,
+            local_count=local_count,
+            max_cloud=max_cloud,
+            max_local=max_local,
+        ):
+            continue
+        if not _is_worker_available(worker_name):
+            continue
+        cloud_count, local_count = _append_worker(
+            selected,
+            worker_name,
+            cloud_count=cloud_count,
+            local_count=local_count,
+        )
+
+    if selected:
+        return selected
+
+    logger.warning(
+        "All workers unhealthy for %s/%s — falling back to raw config",
+        requested_model,
+        task_type,
+    )
+    cloud_count = 0
+    local_count = 0
+    for worker_name in all_workers:
+        if not _fits_worker_bucket(
+            worker_name,
+            cloud_count=cloud_count,
+            local_count=local_count,
+            max_cloud=max_cloud,
+            max_local=max_local,
+        ):
+            continue
+        cloud_count, local_count = _append_worker(
+            selected,
+            worker_name,
+            cloud_count=cloud_count,
+            local_count=local_count,
+        )
+    return selected
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  Node: classify (+ complexity gate)
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def node_classify(s):
     """Classify, inject datetime, decide fast vs deep (with complexity gate)."""
+    ensure_state_defaults(s)
     s["messages"] = inject_datetime(s["messages"])
     s["original_messages"] = [m.copy() for m in s["messages"]]
     s.update(await classify_request(s["messages"]))
-
-    # Agentic defaults
-    s.setdefault("sub_tasks", None)
-    s.setdefault("react_rounds", 0)
-    s.setdefault("reflection_result", {})
-    s.setdefault("reflection_retries", 0)
-    s.setdefault("escalated", False)
-    s.setdefault("is_code_review", False)
-
-    # Search is now tool-only; initialize fields for compatibility
-    s.setdefault("search_performed", False)
-    s.setdefault("search_query", "")
-    s.setdefault("search_results", [])
 
     # Default: no fast path
     s["use_fast_path"] = False
@@ -122,69 +220,7 @@ async def node_plan_panel(s):
     panel = deep_panel_for_model(s["requested_model"])[tt]
 
     requested = s["requested_model"]
-    all_workers = panel["workers"]
-
-    # ── Worker selection with independent cloud/local caps ──
-    # Walk the full config list in order, filling cloud and local buckets
-    # independently.  Unhealthy or unavailable models are skipped and
-    # later candidates backfill their slot.
-    #
-    # audrey_cloud:  only cloud workers, capped by MAX_DEEP_WORKERS_CLOUD
-    # audrey_local:  only local workers, capped by MAX_DEEP_WORKERS
-    # audrey_deep:   both, each capped independently
-
-    if requested == "audrey_cloud":
-        max_cloud, max_local = MAX_DEEP_WORKERS_CLOUD, 0
-    elif requested == "audrey_local":
-        max_cloud, max_local = 0, MAX_DEEP_WORKERS
-    else:
-        # audrey_deep — mixed: independent caps
-        max_cloud, max_local = MAX_DEEP_WORKERS_CLOUD, MAX_DEEP_WORKERS
-
-    selected = []
-    cloud_count = 0
-    local_count = 0
-
-    for w in all_workers:
-        cloud = is_cloud_model(w)
-
-        # Check bucket capacity
-        if cloud and cloud_count >= max_cloud:
-            continue
-        if not cloud and local_count >= max_local:
-            continue
-
-        # Health + availability gate
-        if not is_model_healthy(w):
-            logger.debug("Worker %s skipped: unhealthy (cooldown)", w)
-            continue
-        if not cloud and w not in state.available_models:
-            logger.debug("Worker %s skipped: not in available_models", w)
-            continue
-
-        selected.append(w)
-        if cloud:
-            cloud_count += 1
-        else:
-            local_count += 1
-
-    # Last resort: if health filtering emptied the list entirely,
-    # fall back to the raw config list with the same type caps so we
-    # at least try, but don't exceed intended cloud/local balance.
-    if not selected:
-        logger.warning(
-            "All workers unhealthy for %s/%s — falling back to raw config",
-            requested, tt,
-        )
-        fc, fl = 0, 0
-        for w in all_workers:
-            cloud = is_cloud_model(w)
-            if cloud and fc < max_cloud:
-                selected.append(w)
-                fc += 1
-            elif not cloud and fl < max_local:
-                selected.append(w)
-                fl += 1
+    selected = select_workers(requested, panel["workers"], task_type=tt)
 
     s["deep_workers"] = selected
     s["synthesizer"] = panel["synthesizer"]
@@ -227,12 +263,7 @@ async def node_parallel_generate(s):
                 run_model_with_tools(
                     wn,
                     [sys, *base],
-                    temperature=s["temperature"],
-                    max_tokens=s.get("max_tokens"),
-                    top_p=s.get("top_p"),
-                    stop=s.get("stop"),
-                    frequency_penalty=s.get("frequency_penalty"),
-                    presence_penalty=s.get("presence_penalty"),
+                    **model_call_kwargs(s),
                 ),
                 timeout=DEEP_WORKER_TIMEOUT,
             )
@@ -371,12 +402,7 @@ async def node_synthesize(s):
             r = await run_model_once(
                 sy,
                 s["synthesis_messages"],
-                temperature=min(s["temperature"], 0.3),
-                max_tokens=s.get("max_tokens"),
-                top_p=s.get("top_p"),
-                stop=s.get("stop"),
-                frequency_penalty=s.get("frequency_penalty"),
-                presence_penalty=s.get("presence_penalty"),
+                **model_call_kwargs(s, temperature=min(s["temperature"], 0.3)),
             )
             s["result_text"] = r
             s["selected_model"] = sy
