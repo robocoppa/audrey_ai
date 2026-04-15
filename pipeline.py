@@ -62,6 +62,7 @@ async def node_classify(s):
     s.setdefault("reflection_result", {})
     s.setdefault("reflection_retries", 0)
     s.setdefault("escalated", False)
+    s.setdefault("is_code_review", False)
 
     # Default: no fast path
     s["use_fast_path"] = False
@@ -249,16 +250,17 @@ async def node_plan_panel(s):
 async def node_parallel_generate(s):
     base = s["messages"]
     sub_tasks = s.get("sub_tasks")
+    is_review = s.get("is_code_review", False)
 
     async def one(wn, sub_task=None):
         if sub_task:
             sys_content = (
-                f"{role_prompt(s['task_type'], wn, structured=True)}\n\n"
+                f"{role_prompt(s['task_type'], wn, structured=True, is_code_review=is_review)}\n\n"
                 f"You are assigned this specific sub-task:\n{sub_task}\n\n"
                 f"Focus your answer on this sub-task only. Be thorough and specific."
             )
         else:
-            sys_content = role_prompt(s["task_type"], wn, structured=True)
+            sys_content = role_prompt(s["task_type"], wn, structured=True, is_code_review=is_review)
 
         sys = {"role": "system", "content": sys_content}
         try:
@@ -355,15 +357,32 @@ Prefer correctness and clarity. Resolve any contradictions by favoring the more 
 If drafts reference tool results or web search data, integrate that information naturally.
 If drafts address different sub-tasks of a complex question, combine them into a unified answer."""
 
+_SYNTH_SYS_REVIEW = """You are a synthesis model merging code review drafts into one clear report.
+
+Ranking rules (follow strictly):
+1. Behavior mismatches and correctness bugs come first — things that produce wrong results or crash at runtime.
+2. Logic errors, race conditions, data-loss risks, and missing error handling come next.
+3. Design issues (poor separation of concerns, tight coupling, missing abstractions) follow.
+4. Low-priority section at the end for: theoretical security hardening (timing attacks on localhost, magic-number extraction, structured-logging preferences), style nits, and naming suggestions.
+
+Do NOT lead with security checklist items unless the code has a genuine exploitable vulnerability with a concrete attack path. For local-first application code, bugs and behavior matter more than compliance.
+
+Do NOT mention model names, draft numbers, or that multiple sources were consulted.
+Be specific: cite the function or line, explain the concrete failure mode, and suggest a fix.
+If drafts contradict on severity, favor the one that identifies a concrete failure scenario over the one that cites a generic best practice."""
+
 
 def build_synth_msgs(s):
     outputs = s["worker_outputs"]
+    is_review = s.get("is_code_review", False)
+    sys_prompt = _SYNTH_SYS_REVIEW if is_review else _SYNTH_SYS
+
     secs = []
     for i, o in enumerate(outputs, 1):
         label = o.get("label", "")
         secs.append(f"── Draft {i} ({o['model']}){label} ──\n{o['content']}")
     return [
-        {"role": "system", "content": _SYNTH_SYS},
+        {"role": "system", "content": sys_prompt},
         {
             "role": "user",
             "content": (

@@ -172,12 +172,14 @@ def keyword_prefilter(text: str, *, user_text: Optional[str] = None) -> Optional
                     "task_type": "reasoning",
                     "confidence": 0.85,
                     "needs_vision": False,
+                    "is_code_review": True,
                     "route_reason": f"Keyword (code+review override): {p.pattern[:40]} → reasoning",
                 }
             return {
                 "task_type": "code",
                 "confidence": 0.92,
                 "needs_vision": False,
+                "is_code_review": False,
                 "route_reason": f"Keyword (strong code): {p.pattern[:60]}",
             }
     # Weak code signals (need 2+)
@@ -188,12 +190,14 @@ def keyword_prefilter(text: str, *, user_text: Optional[str] = None) -> Optional
                 "task_type": "reasoning",
                 "confidence": 0.82,
                 "needs_vision": False,
+                "is_code_review": True,
                 "route_reason": f"Keyword (weak code x{len(w)}+review override) → reasoning",
             }
         return {
             "task_type": "code",
             "confidence": 0.85,
             "needs_vision": False,
+            "is_code_review": False,
             "route_reason": f"Keyword (weak code x{len(w)})",
         }
     # Reasoning patterns
@@ -203,6 +207,7 @@ def keyword_prefilter(text: str, *, user_text: Optional[str] = None) -> Optional
                 "task_type": "reasoning",
                 "confidence": 0.80,
                 "needs_vision": False,
+                "is_code_review": False,
                 "route_reason": f"Keyword (reasoning): {p.pattern[:60]}",
             }
     # General/simple patterns
@@ -212,6 +217,7 @@ def keyword_prefilter(text: str, *, user_text: Optional[str] = None) -> Optional
                 "task_type": "general",
                 "confidence": 0.95,
                 "needs_vision": False,
+                "is_code_review": False,
                 "route_reason": f"Keyword (general): {p.pattern[:60]}",
             }
     return None
@@ -385,6 +391,7 @@ async def classify_request(msgs: List[Dict[str, Any]]) -> Dict[str, Any]:
             "task_type": "vl",
             "confidence": 0.99,
             "needs_vision": True,
+            "is_code_review": False,
             "route_reason": "Image detected.",
         }
 
@@ -399,6 +406,9 @@ async def classify_request(msgs: List[Dict[str, Any]]) -> Dict[str, Any]:
         {"role": "system", "content": _ROUTER_SYSTEM},
         {"role": "user", "content": flat},
     ]
+
+    # Check review intent for router-classified results too
+    is_review = bool(_REVIEW_OVERRIDE.search(user_text or flat))
 
     for attempt in range(2):
         try:
@@ -415,10 +425,22 @@ async def classify_request(msgs: List[Dict[str, Any]]) -> Dict[str, Any]:
                 tt = p.get("task_type", "general")
                 if tt not in {"code", "reasoning", "vl", "general"}:
                     tt = "general"
+                # If the router classifies as code but user wants review,
+                # override to reasoning + flag as code review
+                code_review = False
+                if is_review and tt == "code":
+                    tt = "reasoning"
+                    code_review = True
+                elif is_review and tt == "reasoning":
+                    # Router already said reasoning; still flag as code review
+                    # if code signals are present in the input
+                    if any(p.search(user_text or flat) for p in _CS):
+                        code_review = True
                 return {
                     "task_type": tt,
                     "confidence": max(0.0, min(float(p.get("confidence", 0.5)), 1.0)),
                     "needs_vision": bool(p.get("needs_vision", False)),
+                    "is_code_review": code_review,
                     "route_reason": str(p.get("route_reason", "router")),
                 }
 
@@ -430,6 +452,13 @@ async def classify_request(msgs: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     # Both attempts failed — keyword fallback
     fallback = _keyword_fallback_classify(user_text or flat)
+    fallback.setdefault("is_code_review", False)
+    # Check if this is a code review even through the fallback path
+    if is_review and fallback["task_type"] in ("code", "reasoning"):
+        if any(p.search(user_text or flat) for p in _CS):
+            fallback["is_code_review"] = True
+            if fallback["task_type"] == "code":
+                fallback["task_type"] = "reasoning"
     logger.info(
         "Router exhausted — keyword fallback: type=%s conf=%.2f reason=%s",
         fallback["task_type"],

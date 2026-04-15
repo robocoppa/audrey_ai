@@ -85,9 +85,11 @@ def banner(s: Dict[str, Any]) -> str:
         parts = [f"{n}×{c}" if c > 1 else n for n, c in seen.items()]
         tools_str = f" | 🔧 tools: {', '.join(parts)}"
 
+    review = " | 📝 review" if s.get("is_code_review") else ""
+
     return (
         f"[{s.get('requested_model')} → {sel} | {s.get('task_type')} "
-        f"| conf {s.get('confidence', 0):.2f} | {path}{sr}{tools_str}{react}{plan}{refl}{esc} "
+        f"| conf {s.get('confidence', 0):.2f} | {path}{review}{sr}{tools_str}{react}{plan}{refl}{esc} "
         f"| {s.get('route_reason', '')}]\n"
     )
 
@@ -127,7 +129,7 @@ async def stream_fast_path(s: Dict[str, Any]) -> AsyncGenerator[str, None]:
     # Build conversation with system prompt
     sys_msg = {
         "role": "system",
-        "content": f"{_REACT_SYSTEM}\n\nFocus: {role_prompt(s['task_type'], model)}",
+        "content": f"{_REACT_SYSTEM}\n\nFocus: {role_prompt(s['task_type'], model, is_code_review=s.get('is_code_review', False))}",
     }
     msgs = [sys_msg, *s["messages"]]
     tool_calls_log: list = []

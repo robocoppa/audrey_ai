@@ -195,7 +195,7 @@ async def run_react_agent(s: Dict[str, Any]) -> Dict[str, Any]:
         return s
 
     model = s["fast_model"]
-    task_prompt = role_prompt(s["task_type"], model)
+    task_prompt = role_prompt(s["task_type"], model, is_code_review=s.get("is_code_review", False))
 
     sys_msg = {
         "role": "system",
@@ -331,7 +331,7 @@ async def adaptive_escalate(s: Dict[str, Any]) -> Dict[str, Any]:
 
                 model = s["fast_model"]
                 retry_msgs = [
-                    {"role": "system", "content": role_prompt(s["task_type"], model)},
+                    {"role": "system", "content": role_prompt(s["task_type"], model, is_code_review=s.get("is_code_review", False))},
                     *s["messages"],
                     {"role": "assistant", "content": result},
                     {

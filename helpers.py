@@ -107,8 +107,35 @@ def inject_datetime(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 _WSF = "\n\nStructure: ## Approach\n## Answer\n## Caveats\n"
 
+_WSF_REVIEW = (
+    "\n\nStructure: ## Key Issues (ranked by user impact)\n"
+    "## Detailed Findings\n## Minor / Low-Priority Notes\n"
+)
 
-def role_prompt(task_type: str, worker_name: str, structured: bool = False) -> str:
+_CODE_REVIEW_BASE = (
+    "You are reviewing code. Prioritize bugs, correctness errors, and behavior "
+    "mismatches — things that will break at runtime or produce wrong results for "
+    "the user. Rank every finding by user impact, not by generic security severity.\n\n"
+    "Demote theoretical hardening (timing attacks on local services, structured "
+    "logging preferences, magic-number extraction) to a low-priority section unless "
+    "no larger issues exist. For local-first application code, bugs and behavior "
+    "matter more than compliance checklists.\n\n"
+    "Be specific: cite the function or line, explain the concrete failure mode, "
+    "and suggest a fix."
+)
+
+
+def role_prompt(
+    task_type: str,
+    worker_name: str,
+    structured: bool = False,
+    *,
+    is_code_review: bool = False,
+) -> str:
+    if is_code_review:
+        b = _CODE_REVIEW_BASE
+        return b + _WSF_REVIEW if structured else b
+
     if task_type == "code":
         b = (
             "Focus on implementation, correctness, bugs."
