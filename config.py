@@ -45,6 +45,7 @@ MODEL_REGISTRY: dict[str, list[dict[str, Any]]] = _config["model_registry"]
 DEEP_PANEL_CLOUD: dict[str, Any] = _config["deep_panel_cloud"]
 DEEP_PANEL_LOCAL: dict[str, Any] = _config["deep_panel_local"]
 DEEP_PANEL_MIXED: dict[str, Any] = _config["deep_panel"]
+DEEP_PANEL_CODE: dict[str, Any] = _config.get("deep_panel_code", DEEP_PANEL_LOCAL)
 TIMEOUTS: dict[str, int] = _config.get("timeouts", {})
 CACHE_CONFIG: dict[str, Any] = _config.get("cache", {})
 FAST_PATH_CONFIG: dict[str, Any] = _config.get("fast_path", {})
@@ -143,7 +144,13 @@ CACHE_MAX = CACHE_CONFIG.get("max_entries", 256)
 CACHE_TTL = CACHE_CONFIG.get("ttl_seconds", 600)
 
 # ── Virtual models ───────────────────────────────────────────────────────────
-ALL_VIRTUAL_MODELS = {"audrey_deep", "audrey_fast", "audrey_local", "audrey_cloud"}
+ALL_VIRTUAL_MODELS = {
+    "audrey_deep",
+    "audrey_fast",
+    "audrey_local",
+    "audrey_cloud",
+    "audrey_code",
+}
 
 
 def is_cloud_model(name: str) -> bool:
@@ -155,4 +162,7 @@ def deep_panel_for_model(name: str) -> dict[str, Any]:
         return DEEP_PANEL_LOCAL
     if name == "audrey_cloud":
         return DEEP_PANEL_CLOUD
+    if name == "audrey_code":
+        # Deterministic code profile with local-first mixed workers.
+        return DEEP_PANEL_CODE
     return DEEP_PANEL_MIXED  # "audrey_deep" uses mixed

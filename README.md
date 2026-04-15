@@ -49,6 +49,7 @@ Client (OpenAI-compatible) ──► /v1/chat/completions
 | `audrey_fast` | Fast-only: always attempts a single-model fast path and never falls back to deep panel. |
 | `audrey_cloud` | Always uses the cloud-only deep panel. |
 | `audrey_local` | Always uses the local-only deep panel. |
+| `audrey_code` | Code-specific mixed profile: forces `task_type=code`, skips fast path, and uses a local-first code panel with cloud assist. |
 
 ## Core Features
 
@@ -271,6 +272,7 @@ Use Audrey with any OpenAI-compatible client by setting the base URL to your Aud
 - `audrey_fast`
 - `audrey_cloud`
 - `audrey_local`
+- `audrey_code`
 
 ### Python example
 

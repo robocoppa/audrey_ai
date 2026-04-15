@@ -59,6 +59,9 @@ def worker_limits_for_model(
         max_cloud, max_local = MAX_DEEP_WORKERS_CLOUD, 0
     elif requested_model == "audrey_local":
         max_cloud, max_local = 0, MAX_DEEP_WORKERS
+    elif requested_model == "audrey_code":
+        # Mixed profile that prefers local coder workers, with limited cloud assist.
+        max_cloud, max_local = 1, MAX_DEEP_WORKERS
     else:
         max_cloud, max_local = MAX_DEEP_WORKERS_CLOUD, MAX_DEEP_WORKERS
 
@@ -175,6 +178,23 @@ async def node_classify(s):
     ensure_state_defaults(s)
     s["messages"] = inject_datetime(s["messages"])
     s["original_messages"] = [m.copy() for m in s["messages"]]
+    requested = s["requested_model"]
+
+    if requested == "audrey_code":
+        # Explicit code profile: bypass classifier ambiguity and force code panel.
+        s.update(
+            {
+                "task_type": "code",
+                "confidence": 1.0,
+                "needs_vision": False,
+                "is_code_review": False,
+                "route_reason": "forced:audrey_code",
+            }
+        )
+        s["use_fast_path"] = False
+        s["fast_model"] = ""
+        return s
+
     s.update(await classify_request(s["messages"]))
 
     # Default: no fast path
@@ -182,7 +202,6 @@ async def node_classify(s):
     s["fast_model"] = ""
 
     # "audrey_fast" is explicitly fast-only: always attempt a fast model.
-    requested = s["requested_model"]
     if requested == "audrey_fast":
         if not FAST_PATH_ENABLED:
             s["route_reason"] += " → fast_only:disabled"
@@ -250,7 +269,7 @@ async def node_adaptive_escalate(s):
 
 async def node_plan_panel(s):
     tt = s["task_type"]
-    if s["confidence"] < LOW_CONFIDENCE_THRESHOLD:
+    if s["requested_model"] != "audrey_code" and s["confidence"] < LOW_CONFIDENCE_THRESHOLD:
         tt = "general"
         s["task_type"] = "general"
     panel = deep_panel_for_model(s["requested_model"])[tt]

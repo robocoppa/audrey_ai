@@ -207,7 +207,6 @@ async def _await_stream_stage(
     heartbeat_style: str = "line",
 ) -> AsyncGenerator[tuple[str | None, Any], None]:
     started = time.monotonic()
-    emitted_heartbeat_text = False
     heartbeat_ticks = 0
     logger.info(
         "Streaming stage started rid=%s stage=%s model=%s",
@@ -243,12 +242,6 @@ async def _await_stream_stage(
                     stage,
                     elapsed_ms,
                 )
-                if EMIT_STATUS_UPDATES and heartbeat_style == "append_seconds":
-                    tail = ")\n" if emitted_heartbeat_text else "\n"
-                    yield (_sc(rid, created, model_name, tail), _STREAM_STAGE_DONE)
-                elif emitted_heartbeat_text and EMIT_STATUS_UPDATES:
-                    # Finalize the in-place heartbeat row before next stage output.
-                    yield (_sc(rid, created, model_name, ")\n"), _STREAM_STAGE_DONE)
                 yield None, result
                 return
             except asyncio.TimeoutError:
@@ -280,19 +273,23 @@ async def _await_stream_stage(
                         _STREAM_STAGE_DONE,
                     )
                 if EMIT_STATUS_UPDATES:
+                    should_emit_status = True
                     if heartbeat_style == "append_seconds":
-                        if not emitted_heartbeat_text:
-                            emitted_heartbeat_text = True
-                            chunk_text = f" ({elapsed_s}s"
-                        else:
-                            chunk_text = f", {elapsed_s}s"
-                    else:
-                        if not emitted_heartbeat_text:
-                            emitted_heartbeat_text = True
-                            chunk_text = f"⏳ {heartbeat_text} ({elapsed_s}s"
-                        else:
-                            chunk_text = f", {elapsed_s}s"
-                    yield (_sc(rid, created, model_name, chunk_text), _STREAM_STAGE_DONE)
+                        # Keep very long stages readable: first ping, then every ~2 min.
+                        throttle_ticks = max(
+                            1,
+                            120 // max(1, STREAM_HEARTBEAT_SECONDS),
+                        )
+                        should_emit_status = (
+                            heartbeat_ticks == 1
+                            or heartbeat_ticks % throttle_ticks == 0
+                        )
+                    if should_emit_status:
+                        chunk_text = f"⏳ {heartbeat_text} ({elapsed_s}s elapsed)\n"
+                        yield (
+                            _sc(rid, created, model_name, chunk_text),
+                            _STREAM_STAGE_DONE,
+                        )
     except Exception:
         elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.exception(
@@ -314,7 +311,13 @@ async def _await_stream_stage(
 
 async def validate_models():
     """Check which configured models are actually available in Ollama."""
-    from config import MODEL_REGISTRY, DEEP_PANEL_MIXED, DEEP_PANEL_CLOUD, DEEP_PANEL_LOCAL
+    from config import (
+        MODEL_REGISTRY,
+        DEEP_PANEL_MIXED,
+        DEEP_PANEL_CLOUD,
+        DEEP_PANEL_LOCAL,
+        DEEP_PANEL_CODE,
+    )
 
     try:
         async with state.ollama_session.get(
@@ -338,7 +341,12 @@ async def validate_models():
         for category in MODEL_REGISTRY.values():
             for entry in category:
                 configured.add(entry["name"])
-        for panel_set in [DEEP_PANEL_MIXED, DEEP_PANEL_CLOUD, DEEP_PANEL_LOCAL]:
+        for panel_set in [
+            DEEP_PANEL_MIXED,
+            DEEP_PANEL_CLOUD,
+            DEEP_PANEL_LOCAL,
+            DEEP_PANEL_CODE,
+        ]:
             for cat in panel_set.values():
                 for w in cat.get("workers", []):
                     configured.add(w)

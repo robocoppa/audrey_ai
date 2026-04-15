@@ -220,6 +220,44 @@ deep_panel_local:
     synthesizer: "qwen3.5:35b-a3b"
     fallback_synthesizer: "deepseek-r1:32b"
 
+# ─── Deep Panel Code (local-first mixed profile for audrey_code) ───
+deep_panel_code:
+  code:
+    workers:
+      - "qwen3-coder-next:latest"
+      - "devstral-small-2:latest"
+      - "deepseek-v3.2:cloud"
+      - "qwen3.5:397b-cloud"
+    synthesizer: "qwen3.5:35b-a3b"
+    fallback_synthesizer: "deepseek-v3.2:cloud"
+
+  reasoning:
+    workers:
+      - "qwen3-coder-next:latest"
+      - "devstral-small-2:latest"
+      - "deepseek-v3.2:cloud"
+      - "qwen3.5:397b-cloud"
+    synthesizer: "qwen3.5:35b-a3b"
+    fallback_synthesizer: "deepseek-v3.2:cloud"
+
+  vl:
+    workers:
+      - "qwen3-coder-next:latest"
+      - "devstral-small-2:latest"
+      - "deepseek-v3.2:cloud"
+      - "qwen3.5:397b-cloud"
+    synthesizer: "qwen3.5:35b-a3b"
+    fallback_synthesizer: "deepseek-v3.2:cloud"
+
+  general:
+    workers:
+      - "qwen3-coder-next:latest"
+      - "devstral-small-2:latest"
+      - "deepseek-v3.2:cloud"
+      - "qwen3.5:397b-cloud"
+    synthesizer: "qwen3.5:35b-a3b"
+    fallback_synthesizer: "deepseek-v3.2:cloud"
+
 # ─── Agentic Features ───
 agentic:
   react:
