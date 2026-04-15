@@ -207,6 +207,7 @@ async def _await_stream_stage(
 ) -> AsyncGenerator[tuple[str | None, Any], None]:
     started = time.monotonic()
     emitted_heartbeat_text = False
+    heartbeat_ticks = 0
     logger.info(
         "Streaming stage started rid=%s stage=%s model=%s",
         request_id,
@@ -247,11 +248,14 @@ async def _await_stream_stage(
                 yield None, result
                 return
             except asyncio.TimeoutError:
-                elapsed_s = max(1, int(time.monotonic() - started))
+                heartbeat_ticks += 1
+                elapsed_s = heartbeat_ticks * STREAM_HEARTBEAT_SECONDS
+                actual_elapsed_s = max(1, int(time.monotonic() - started))
                 logger.info(
-                    "Streaming stage pending rid=%s stage=%s elapsed_s=%d",
+                    "Streaming stage pending rid=%s stage=%s elapsed_s=%d displayed_s=%d",
                     request_id,
                     stage,
+                    actual_elapsed_s,
                     elapsed_s,
                 )
                 if EMIT_TIMELINE_EVENTS:
@@ -272,16 +276,12 @@ async def _await_stream_stage(
                         _STREAM_STAGE_DONE,
                     )
                 if EMIT_STATUS_UPDATES:
-                    emitted_heartbeat_text = True
-                    yield (
-                        _sc(
-                            rid,
-                            created,
-                            model_name,
-                            f"\r⏳ {heartbeat_text} ({elapsed_s}s)",
-                        ),
-                        _STREAM_STAGE_DONE,
-                    )
+                    if not emitted_heartbeat_text:
+                        emitted_heartbeat_text = True
+                        chunk_text = f"⏳ {heartbeat_text} ({elapsed_s}s"
+                    else:
+                        chunk_text = f", {elapsed_s}s"
+                    yield (_sc(rid, created, model_name, chunk_text), _STREAM_STAGE_DONE)
     except Exception:
         elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.exception(
