@@ -63,7 +63,12 @@ def _resolve_sid_ct(
 
 # ── Banner builder ───────────────────────────────────────────────────────────
 
-def banner(s: dict[str, Any]) -> str:
+def banner(
+    s: dict[str, Any],
+    *,
+    running_model: str | None = None,
+    finished_model: str | None = None,
+) -> str:
     """Build a compact, readable routing banner for the chat UI."""
     sel = s.get("selected_model") or s.get("synthesizer") or "?"
     path = "fast+react" if s.get("use_fast_path") else "deep"
@@ -104,6 +109,13 @@ def banner(s: dict[str, Any]) -> str:
     if s.get("escalated"):
         tags.append("⬆ escalated")
 
+    run_name = str(running_model or "").strip()
+    done_name = str(finished_model or "").strip()
+    if run_name:
+        tags.append(f"▶ running: {run_name}")
+    if done_name:
+        tags.append(f"✅ finished: {done_name}")
+
     detail = f" | {' | '.join(tags)}" if tags else ""
 
     return (
@@ -138,9 +150,9 @@ async def stream_fast_path(
         return
 
     if EMIT_STATUS_UPDATES:
-        yield _sc(sid, ct, mn, f"⚡ Fast path (ReAct): {model}\n\n")
+        yield _sc(sid, ct, mn, f"⚡ Running fast model: {model} (ReAct tools/search)\n\n")
     if EMIT_ROUTING_BANNER:
-        yield _sc(sid, ct, mn, banner(s))
+        yield _sc(sid, ct, mn, banner(s, running_model=model))
 
     sys_msg = {
         "role": "system",
@@ -159,12 +171,17 @@ async def stream_fast_path(
                 yield _sc(sid, ct, mn, c)
             if item.get("done"):
                 note_model_success(model)
+                s["selected_model"] = model
                 if mn == "audrey_fast":
                     state.update_audrey_fast_health(
                         selected_model=model,
                         success=True,
                         reason=s.get("route_reason", "fast_only:completed"),
                     )
+                if EMIT_STATUS_UPDATES:
+                    yield _sc(sid, ct, mn, f"\n✅ Fast model finished: {model}\n")
+                if EMIT_ROUTING_BANNER:
+                    yield _sc(sid, ct, mn, banner(s, finished_model=model))
                 yield _sc_stop(sid, ct, mn)
                 yield _SSE_DONE
                 return
@@ -215,9 +232,9 @@ async def stream_synthesis(
                 yield _sc(sid, ct, mn, f"🌐 Web search used: {search_query}\n")
             else:
                 yield _sc(sid, ct, mn, "🌐 Web search used\n")
-        yield _sc(sid, ct, mn, f"✨ Synthesizing with {current_synth}...\n\n---\n\n")
+        yield _sc(sid, ct, mn, f"✨ Running synthesis model: {current_synth}...\n\n---\n\n")
     if EMIT_ROUTING_BANNER:
-        yield _sc(sid, ct, mn, banner(ps))
+        yield _sc(sid, ct, mn, banner(ps, running_model=current_synth))
 
     for i, synth in enumerate(synth_candidates):
         try:
@@ -232,6 +249,10 @@ async def stream_synthesis(
                 if item.get("done"):
                     note_model_success(synth)
                     ps["selected_model"] = synth
+                    if EMIT_STATUS_UPDATES:
+                        yield _sc(sid, ct, mn, f"\n✅ Synthesis model finished: {synth}\n")
+                    if EMIT_ROUTING_BANNER:
+                        yield _sc(sid, ct, mn, banner(ps, finished_model=synth))
                     yield _sc_stop(sid, ct, mn)
                     yield _SSE_DONE
                     return
@@ -241,6 +262,8 @@ async def stream_synthesis(
             if EMIT_STATUS_UPDATES and i < len(synth_candidates) - 1:
                 nxt = synth_candidates[i + 1]
                 yield _sc(sid, ct, mn, f"\n[Retrying synthesis with {nxt}]\n\n")
+                if EMIT_ROUTING_BANNER:
+                    yield _sc(sid, ct, mn, banner(ps, running_model=nxt))
 
     yield _sc(sid, ct, mn, "[Error. Please try again.]")
     yield _sc_stop(sid, ct, mn)

@@ -918,12 +918,20 @@ async def chat_completions(req: ChatCompletionRequest):
 
                 # Decide path — search is handled by tool-calling during generation
                 if classified.get("use_fast_path") and classified.get("fast_model"):
+                    fast_model = str(classified.get("fast_model", "")).strip()
                     if EMIT_STATUS_UPDATES:
                         yield _sc(
                             rid,
                             ct,
                             req.model,
-                            "⚡ Running fast path with tools/search...\n",
+                            f"⚡ Running fast model: {fast_model} (tools/search)\n",
+                        )
+                    if EMIT_ROUTING_BANNER and fast_model:
+                        yield _sc(
+                            rid,
+                            ct,
+                            req.model,
+                            banner(classified, running_model=fast_model),
                         )
 
                     fast_result = None
@@ -960,12 +968,16 @@ async def chat_completions(req: ChatCompletionRequest):
                                     "route_reason", "fast_only:completed"
                                 ),
                             )
+                        selected_fast_model = fast_result.get(
+                            "selected_model",
+                            fast_result.get("fast_model", "?"),
+                        )
                         if EMIT_STATUS_UPDATES:
                             yield _sc(
                                 rid,
                                 ct,
                                 req.model,
-                                f"⚡ Fast path complete: {fast_result.get('selected_model', fast_result.get('fast_model', '?'))}\n\n",
+                                f"✅ Fast model finished: {selected_fast_model}\n\n",
                             )
                             if fast_result.get("search_performed"):
                                 search_query = str(
@@ -981,7 +993,12 @@ async def chat_completions(req: ChatCompletionRequest):
                                 else:
                                     yield _sc(rid, ct, req.model, "🌐 Web search used\n")
                         if EMIT_ROUTING_BANNER:
-                            yield _sc(rid, ct, req.model, banner(fast_result))
+                            yield _sc(
+                                rid,
+                                ct,
+                                req.model,
+                                banner(fast_result, finished_model=selected_fast_model),
+                            )
                         fast_complete_evt = _emit_timeline_event(
                             fast_result,
                             stage="complete",
@@ -1120,12 +1137,25 @@ async def chat_completions(req: ChatCompletionRequest):
                         req.model,
                         f"📋 Planning: {len(planned['sub_tasks'])} sub-tasks\n",
                     )
+                deep_workers = [
+                    str(w).strip()
+                    for w in planned.get("deep_workers", [])
+                    if str(w).strip()
+                ]
+                workers_text = ", ".join(deep_workers) if deep_workers else "none"
                 if EMIT_STATUS_UPDATES:
                     yield _sc(
                         rid,
                         ct,
                         req.model,
-                        f"🧠 Generating drafts from {len(planned.get('deep_workers', []))} models...",
+                        f"🧠 Running worker models: {workers_text}\n",
+                    )
+                if EMIT_ROUTING_BANNER and deep_workers:
+                    yield _sc(
+                        rid,
+                        ct,
+                        req.model,
+                        banner(planned, running_model=workers_text),
                     )
 
                 generated = None
@@ -1156,6 +1186,33 @@ async def chat_completions(req: ChatCompletionRequest):
                 )
                 if generate_evt:
                     yield generate_evt
+                finished_workers = [
+                    str(o.get("model", "")).strip()
+                    for o in generated.get("worker_outputs", [])
+                    if str(o.get("model", "")).strip()
+                ]
+                finished_workers_text = (
+                    ", ".join(dict.fromkeys(finished_workers))
+                    or workers_text
+                )
+                if EMIT_STATUS_UPDATES:
+                    yield _sc(
+                        rid,
+                        ct,
+                        req.model,
+                        f"✅ Worker models finished: {finished_workers_text}\n",
+                    )
+                if (
+                    EMIT_ROUTING_BANNER
+                    and finished_workers_text
+                    and finished_workers_text != "none"
+                ):
+                    yield _sc(
+                        rid,
+                        ct,
+                        req.model,
+                        banner(generated, finished_model=finished_workers_text),
+                    )
 
                 if EMIT_STATUS_UPDATES:
                     yield _sc(rid, ct, req.model, "🧩 Preparing synthesis...\n")
