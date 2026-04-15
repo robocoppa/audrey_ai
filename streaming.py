@@ -11,6 +11,7 @@ import uuid
 import time
 from typing import Any, AsyncGenerator, Dict
 
+import state
 from config import EMIT_ROUTING_BANNER, EMIT_STATUS_UPDATES
 from health import note_model_failure, note_model_success
 from helpers import model_call_kwargs, role_prompt
@@ -90,6 +91,12 @@ async def stream_fast_path(s: Dict[str, Any]) -> AsyncGenerator[str, None]:
     # Guard: if fast_model is blank, yield error and bail
     if not model:
         logger.warning("stream_fast_path called with empty fast_model — skipping")
+        if mn == "audrey_fast":
+            state.update_audrey_fast_health(
+                selected_model="none",
+                success=False,
+                reason="fast_only:no_model_selected",
+            )
         yield _sc(rid, ct, mn, "[Fast path error: no model selected. Falling back.]\n")
         yield (
             f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': mn, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
@@ -122,6 +129,12 @@ async def stream_fast_path(s: Dict[str, Any]) -> AsyncGenerator[str, None]:
                 )
             if item.get("done"):
                 note_model_success(model)
+                if mn == "audrey_fast":
+                    state.update_audrey_fast_health(
+                        selected_model=model,
+                        success=True,
+                        reason=s.get("route_reason", "fast_only:completed"),
+                    )
                 yield (
                     f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': mn, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
                 )
@@ -130,6 +143,12 @@ async def stream_fast_path(s: Dict[str, Any]) -> AsyncGenerator[str, None]:
     except Exception as e:
         note_model_failure(model)
         logger.warning("Fast streaming failed for %s: %s", model, e)
+        if mn == "audrey_fast":
+            state.update_audrey_fast_health(
+                selected_model=model,
+                success=False,
+                reason=f"fast_only:stream_error:{str(e)[:120]}",
+            )
         yield _sc(rid, ct, mn, f"\n\n[Fast path error: {model}. Please retry.]\n")
         yield (
             f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': mn, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"

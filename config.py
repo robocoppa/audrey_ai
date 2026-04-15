@@ -49,6 +49,7 @@ MAX_DEEP_WORKERS_CLOUD = int(os.getenv("MAX_DEEP_WORKERS_CLOUD", "3"))
 EMIT_ROUTING_BANNER = os.getenv("EMIT_ROUTING_BANNER", "true").lower() == "true"
 GPU_CONCURRENCY = int(os.getenv("GPU_CONCURRENCY", "1"))
 EMIT_STATUS_UPDATES = os.getenv("EMIT_STATUS_UPDATES", "true").lower() == "true"
+STREAM_HEARTBEAT_SECONDS = int(os.getenv("STREAM_HEARTBEAT_SECONDS", "15"))
 DEEP_WORKER_TIMEOUT = int(
     os.getenv("DEEP_WORKER_TIMEOUT", str(TIMEOUTS.get("deep_worker", 240)))
 )
@@ -120,7 +121,7 @@ CACHE_MAX = CACHE_CONFIG.get("max_entries", 256)
 CACHE_TTL = CACHE_CONFIG.get("ttl_seconds", 600)
 
 # ── Virtual models ───────────────────────────────────────────────────────────
-ALL_VIRTUAL_MODELS = {"audrey_deep", "audrey_local", "audrey_cloud"}
+ALL_VIRTUAL_MODELS = {"audrey_deep", "audrey_fast", "audrey_local", "audrey_cloud"}
 
 
 def is_cloud_model(name: str) -> bool:

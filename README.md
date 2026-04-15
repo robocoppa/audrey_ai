@@ -44,6 +44,7 @@ Client (OpenAI-compatible) ──► /v1/chat/completions
 | Model | Behavior |
 |---|---|
 | `audrey_deep` | Auto-routes: tries fast path for high-confidence, simple requests; otherwise uses the mixed deep panel. |
+| `audrey_fast` | Fast-only: always attempts a single-model fast path and never falls back to deep panel. |
 | `audrey_cloud` | Always uses the cloud-only deep panel. |
 | `audrey_local` | Always uses the local-only deep panel. |
 
@@ -56,7 +57,7 @@ A small router model classifies requests into `code`, `reasoning`, `vl`, or `gen
 Large inputs can be forced to the deep panel even when classification confidence is high. This helps prevent large code reviews or document analysis from being handled by a single-model fast path.
 
 ### Fast path
-For eligible `audrey_deep` requests, Audrey selects a single best-fit model from the configured registry. If tools are enabled, a tool registry is available, and the selected model supports tools, the fast path can run a ReAct-style tool loop. Otherwise it performs a direct single-model completion.
+For eligible `audrey_deep` requests, Audrey selects a single best-fit model from the configured registry. If tools are enabled, a tool registry is available, and the selected model supports tools, the fast path can run a ReAct-style tool loop. Otherwise it performs a direct single-model completion. `audrey_fast` uses this path as a strict fast-only mode.
 
 ### Deep panel
 Complex requests are sent to multiple specialist workers in parallel. Their drafts are then merged by a synthesizer model into one final answer.
@@ -161,7 +162,7 @@ Non-streaming request:
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "audrey_deep",
+    "model": "audrey_fast",
     "messages": [{"role": "user", "content": "Explain quicksort with a Python implementation"}],
     "stream": false
   }'
@@ -198,6 +199,7 @@ curl -N http://localhost:8000/v1/chat/completions \
 | `BRAVE_API_KEY` | empty | Brave Search API key |
 | `EMIT_ROUTING_BANNER` | `true` | Show routing banner in responses |
 | `EMIT_STATUS_UPDATES` | `true` | Show status updates during streaming |
+| `STREAM_HEARTBEAT_SECONDS` | `15` | Emit "still working" streaming updates while long stages are running |
 | `COMPLEXITY_FORCE_DEEP` | `true` | Force deep panel for large inputs |
 | `COMPLEXITY_TOKEN_THRESHOLD` | `500` | Estimated token threshold for deep-panel forcing |
 | `REACT_MAX_ROUNDS` | `3` | Maximum ReAct/tool rounds |
@@ -249,6 +251,7 @@ The current compose files use named Docker volumes for tool data and sandbox sto
 
 Use Audrey with any OpenAI-compatible client by setting the base URL to your Audrey instance and choosing one of:
 - `audrey_deep`
+- `audrey_fast`
 - `audrey_cloud`
 - `audrey_local`
 

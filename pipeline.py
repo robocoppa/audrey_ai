@@ -166,8 +166,22 @@ async def node_classify(s):
     s["use_fast_path"] = False
     s["fast_model"] = ""
 
-    # "audrey_deep" tries fast path when confidence is high enough
+    # "audrey_fast" is explicitly fast-only: always attempt a fast model.
     requested = s["requested_model"]
+    if requested == "audrey_fast":
+        if not FAST_PATH_ENABLED:
+            s["route_reason"] += " → fast_only:disabled"
+            return s
+        fm = select_fast_model(s["task_type"])
+        if fm:
+            s["use_fast_path"] = True
+            s["fast_model"] = fm
+            s["route_reason"] += f" → fast_only:{fm}"
+        else:
+            s["route_reason"] += " → fast_only:no_healthy_model"
+        return s
+
+    # "audrey_deep" tries fast path when confidence is high enough
     if FAST_PATH_ENABLED and requested == "audrey_deep":
         if s["confidence"] >= FAST_PATH_CONFIDENCE:
             fm = select_fast_model(s["task_type"])

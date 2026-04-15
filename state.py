@@ -7,7 +7,8 @@ by every other module.
 """
 
 import asyncio
-from typing import Optional, Set
+import time
+from typing import Any, Dict, Optional, Set
 
 import aiohttp
 
@@ -26,3 +27,18 @@ gpu_semaphore: asyncio.Semaphore = asyncio.Semaphore(GPU_CONCURRENCY)
 
 # Models actually present in Ollama (populated by validate_models)
 available_models: Set[str] = set()
+
+# Last observed audrey_fast routing outcome (used by /health).
+audrey_fast_health: Dict[str, Any] = {
+    "selected_model": "none",
+    "last_status": "unknown",
+    "last_reason": "no audrey_fast requests yet",
+    "updated_at": None,
+}
+
+
+def update_audrey_fast_health(*, selected_model: str, success: bool, reason: str) -> None:
+    audrey_fast_health["selected_model"] = selected_model or "none"
+    audrey_fast_health["last_status"] = "success" if success else "failure"
+    audrey_fast_health["last_reason"] = reason or ""
+    audrey_fast_health["updated_at"] = int(time.time())
