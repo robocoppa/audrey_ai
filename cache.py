@@ -6,7 +6,7 @@ import hashlib
 import json
 import time
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from config import CACHE_MAX, CACHE_TTL
 
@@ -21,15 +21,15 @@ class LRUCache:
 
     def _key(
         self,
-        msgs: List[Dict[str, Any]],
+        msgs: list[dict[str, Any]],
         model: str,
         temp: float,
         *,
-        max_tokens: Optional[int] = None,
-        top_p: Optional[float] = None,
-        stop: Optional[Any] = None,
-        frequency_penalty: Optional[float] = None,
-        presence_penalty: Optional[float] = None,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
+        stop: Any | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
     ) -> str:
         return hashlib.sha256(
             json.dumps(
@@ -49,16 +49,16 @@ class LRUCache:
 
     def get(
         self,
-        msgs: List[Dict[str, Any]],
+        msgs: list[dict[str, Any]],
         model: str,
         temp: float,
         *,
-        max_tokens: Optional[int] = None,
-        top_p: Optional[float] = None,
-        stop: Optional[Any] = None,
-        frequency_penalty: Optional[float] = None,
-        presence_penalty: Optional[float] = None,
-    ) -> Optional[str]:
+        max_tokens: int | None = None,
+        top_p: float | None = None,
+        stop: Any | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+    ) -> str | None:
         k = self._key(
             msgs, model, temp,
             max_tokens=max_tokens, top_p=top_p, stop=stop,
@@ -79,16 +79,16 @@ class LRUCache:
 
     def put(
         self,
-        msgs: List[Dict[str, Any]],
+        msgs: list[dict[str, Any]],
         model: str,
         temp: float,
         txt: str,
         *,
-        max_tokens: Optional[int] = None,
-        top_p: Optional[float] = None,
-        stop: Optional[Any] = None,
-        frequency_penalty: Optional[float] = None,
-        presence_penalty: Optional[float] = None,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
+        stop: Any | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
     ) -> None:
         k = self._key(
             msgs, model, temp,
@@ -101,7 +101,7 @@ class LRUCache:
             self._store.popitem(last=False)
 
     @property
-    def stats(self) -> Dict[str, int]:
+    def stats(self) -> dict[str, int]:
         return {"hits": self._hits, "misses": self._misses, "size": len(self._store)}
 
 

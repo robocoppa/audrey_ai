@@ -8,7 +8,7 @@ plus the graph construction and compilation.
 import asyncio
 import logging
 import traceback
-from typing import Any, Dict, List
+from typing import Any
 
 from langgraph.graph import END, StateGraph
 
@@ -39,7 +39,6 @@ from helpers import (
 )
 from models import AudreyState
 from ollama import run_model_once, run_model_with_tools_detailed
-from helpers import get_last_user_text
 
 logger = logging.getLogger("audrey.pipeline")
 
@@ -48,13 +47,22 @@ logger = logging.getLogger("audrey.pipeline")
 #  Worker selection helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def worker_limits_for_model(requested_model: str) -> tuple[int, int]:
+def worker_limits_for_model(
+    requested_model: str,
+    *,
+    audrey_mode: str = "balanced",
+) -> tuple[int, int]:
     """Return the independent cloud/local worker caps for a virtual model."""
     if requested_model == "audrey_cloud":
-        return MAX_DEEP_WORKERS_CLOUD, 0
-    if requested_model == "audrey_local":
-        return 0, MAX_DEEP_WORKERS
-    return MAX_DEEP_WORKERS_CLOUD, MAX_DEEP_WORKERS
+        max_cloud, max_local = MAX_DEEP_WORKERS_CLOUD, 0
+    elif requested_model == "audrey_local":
+        max_cloud, max_local = 0, MAX_DEEP_WORKERS
+    else:
+        max_cloud, max_local = MAX_DEEP_WORKERS_CLOUD, MAX_DEEP_WORKERS
+
+    if audrey_mode == "quick":
+        return min(max_cloud, 1), min(max_local, 1)
+    return max_cloud, max_local
 
 
 def _fits_worker_bucket(
@@ -81,7 +89,7 @@ def _is_worker_available(worker_name: str) -> bool:
 
 
 def _append_worker(
-    selected: List[str],
+    selected: list[str],
     worker_name: str,
     *,
     cloud_count: int,
@@ -95,14 +103,18 @@ def _append_worker(
 
 def select_workers(
     requested_model: str,
-    all_workers: List[str],
+    all_workers: list[str],
     *,
     task_type: str,
-) -> List[str]:
+    audrey_mode: str = "balanced",
+) -> list[str]:
     """Select deep workers using caps, health, and availability gates."""
-    max_cloud, max_local = worker_limits_for_model(requested_model)
+    max_cloud, max_local = worker_limits_for_model(
+        requested_model,
+        audrey_mode=audrey_mode,
+    )
 
-    selected: List[str] = []
+    selected: list[str] = []
     cloud_count = 0
     local_count = 0
 
@@ -183,8 +195,15 @@ async def node_classify(s):
         return s
 
     # "audrey_deep" tries fast path when confidence is high enough
+    confidence_threshold = float(
+        s.get("fast_path_confidence", FAST_PATH_CONFIDENCE) or FAST_PATH_CONFIDENCE
+    )
+    if requested == "audrey_deep" and s.get("force_deep_profile"):
+        s["route_reason"] += " → mode:research_force_deep"
+        return s
+
     if FAST_PATH_ENABLED and requested == "audrey_deep":
-        if s["confidence"] >= FAST_PATH_CONFIDENCE:
+        if s["confidence"] >= confidence_threshold:
             fm = select_fast_model(s["task_type"])
             if fm:
                 # ── Complexity gate ──────────────────────────────────
@@ -235,13 +254,25 @@ async def node_plan_panel(s):
     panel = deep_panel_for_model(s["requested_model"])[tt]
 
     requested = s["requested_model"]
-    selected = select_workers(requested, panel["workers"], task_type=tt)
+    mode = str(s.get("audrey_mode", "balanced"))
+    selected = select_workers(
+        requested,
+        panel["workers"],
+        task_type=tt,
+        audrey_mode=mode,
+    )
 
     s["deep_workers"] = selected
     s["synthesizer"] = panel["synthesizer"]
     s["fallback_synthesizer"] = panel.get("fallback_synthesizer", "")
 
-    sub_tasks = await plan_sub_tasks(s["messages"], tt)
+    sub_tasks = await plan_sub_tasks(
+        s["messages"],
+        tt,
+        audrey_mode=mode,
+        planning_enabled_override=s.get("planning_enabled_override"),
+        min_tokens_override=s.get("planning_min_tokens_override"),
+    )
     s["sub_tasks"] = sub_tasks
 
     logger.info(
@@ -331,10 +362,9 @@ async def node_parallel_generate(s):
     local_tasks = [(w, t) for w, t in assignments if not is_cloud_model(w)]
 
     async def run_local():
-        results = []
-        for w, t in local_tasks:
-            results.append(await one(w, t))
-        return results
+        if not local_tasks:
+            return []
+        return list(await asyncio.gather(*[one(w, t) for w, t in local_tasks]))
 
     if cloud_tasks and local_tasks:
         cr, lr = await asyncio.gather(
@@ -446,7 +476,10 @@ async def node_synthesize(s):
 
 async def node_reflect_deep(s):
     """Reflection gate for deep panel output."""
-    if not REFLECTION_ENABLED or not s.get("result_text"):
+    reflection_enabled = s.get("reflection_enabled_override")
+    if reflection_enabled is None:
+        reflection_enabled = REFLECTION_ENABLED
+    if not reflection_enabled or not s.get("result_text"):
         return s
 
     reflection = await reflect_on_response(
@@ -455,7 +488,10 @@ async def node_reflect_deep(s):
     )
     s["reflection_result"] = reflection
 
-    if reflection["quality"] == "poor" and s.get("reflection_retries", 0) < REFLECTION_MAX_RETRIES:
+    retries_limit = s.get("reflection_max_retries_override")
+    if retries_limit is None:
+        retries_limit = REFLECTION_MAX_RETRIES
+    if reflection["quality"] == "poor" and s.get("reflection_retries", 0) < retries_limit:
         s["reflection_retries"] = s.get("reflection_retries", 0) + 1
         logger.info("Deep reflection: quality=poor — re-synthesizing with feedback")
 

@@ -6,11 +6,13 @@ It supports:
 - request classification by task type
 - single-model fast-path execution for simple requests
 - multi-worker deep-panel synthesis for complex requests
+- per-request latency/quality mode (`quick`, `balanced`, `research`)
 - automatic web search
 - OpenAPI-based tool discovery
 - optional ReAct-style tool loops
 - planning, reflection, and adaptive escalation
 - OpenAI-style SSE responses
+- timeline and trust metadata for UI clients
 
 ## Architecture
 
@@ -64,6 +66,17 @@ Complex requests are sent to multiple specialist workers in parallel. Their draf
 
 ### Planning, reflection, and escalation
 Complex requests can be decomposed into sub-tasks before worker dispatch. Reflection checks can evaluate response quality, and weak fast-path results can escalate automatically to the deep panel.
+
+### Latency/quality mode
+Each request can set `audrey_mode`:
+- `quick` for lowest latency (fewer worker/tool/reflection rounds)
+- `balanced` for default behavior
+- `research` for highest quality (forces deep panel for `audrey_deep`, stronger planning/reflection)
+
+### Timeline and trust signals
+Non-streaming responses include an `audrey` metadata object:
+- `audrey.timeline` provides machine-readable stage events
+- `audrey.trust` provides freshness/search/tool/reflection/escalation signals for UI trust badges
 
 ### Tool discovery
 Audrey discovers tools dynamically from one or more OpenAPI-compatible HTTP servers at startup. No hardcoded wrappers are required.
@@ -163,6 +176,7 @@ curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "audrey_fast",
+    "audrey_mode": "quick",
     "messages": [{"role": "user", "content": "Explain quicksort with a Python implementation"}],
     "stream": false
   }'
@@ -175,6 +189,7 @@ curl -N http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "audrey_deep",
+    "audrey_mode": "research",
     "messages": [{"role": "user", "content": "What happened in the news today?"}],
     "stream": true
   }'
@@ -199,6 +214,8 @@ curl -N http://localhost:8000/v1/chat/completions \
 | `BRAVE_API_KEY` | empty | Brave Search API key |
 | `EMIT_ROUTING_BANNER` | `true` | Show routing banner in responses |
 | `EMIT_STATUS_UPDATES` | `true` | Show status updates during streaming |
+| `EMIT_TIMELINE_EVENTS` | `true` | Emit structured timeline events in streaming chunks |
+| `EMIT_TRUST_SIGNALS` | `true` | Include trust metadata in responses and streaming events |
 | `STREAM_HEARTBEAT_SECONDS` | `15` | Emit "still working" streaming updates while long stages are running |
 | `COMPLEXITY_FORCE_DEEP` | `true` | Force deep panel for large inputs |
 | `COMPLEXITY_TOKEN_THRESHOLD` | `500` | Estimated token threshold for deep-panel forcing |

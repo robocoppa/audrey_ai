@@ -8,7 +8,7 @@ model runners with optional tool-calling support.
 import json
 import logging
 import traceback
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator
 
 import aiohttp
 
@@ -23,18 +23,18 @@ logger = logging.getLogger("audrey.ollama")
 
 def build_ollama_payload(
     model: str,
-    msgs: List[Dict[str, Any]],
+    msgs: list[dict[str, Any]],
     *,
     temperature: float,
-    max_tokens: Optional[int],
-    top_p: Optional[float],
-    stop: Optional[Any],
+    max_tokens: int | None,
+    top_p: float | None,
+    stop: Any | None,
     stream: bool,
-    frequency_penalty: Optional[float] = None,
-    presence_penalty: Optional[float] = None,
-    tools: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
-    p: Dict[str, Any] = {
+    frequency_penalty: float | None = None,
+    presence_penalty: float | None = None,
+    tools: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    p: dict[str, Any] = {
         "model": model,
         "messages": msgs,
         "stream": stream,
@@ -59,17 +59,17 @@ def build_ollama_payload(
 
 async def ollama_chat_once(
     model: str,
-    msgs: List[Dict[str, Any]],
+    msgs: list[dict[str, Any]],
     *,
     temperature: float,
-    max_tokens: Optional[int],
-    top_p: Optional[float],
-    stop: Optional[Any],
-    frequency_penalty: Optional[float] = None,
-    presence_penalty: Optional[float] = None,
-    tools: Optional[List[Dict[str, Any]]] = None,
-    request_timeout: Optional[int] = None,
-) -> Dict[str, Any]:
+    max_tokens: int | None,
+    top_p: float | None,
+    stop: Any | None,
+    frequency_penalty: float | None = None,
+    presence_penalty: float | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    request_timeout: int | None = None,
+) -> dict[str, Any]:
     pl = build_ollama_payload(
         model, msgs,
         temperature=temperature, max_tokens=max_tokens, top_p=top_p,
@@ -99,15 +99,15 @@ async def ollama_chat_once(
 
 async def ollama_chat_stream(
     model: str,
-    msgs: List[Dict[str, Any]],
+    msgs: list[dict[str, Any]],
     *,
     temperature: float,
-    max_tokens: Optional[int],
-    top_p: Optional[float],
-    stop: Optional[Any],
-    frequency_penalty: Optional[float] = None,
-    presence_penalty: Optional[float] = None,
-) -> AsyncGenerator[Dict[str, Any], None]:
+    max_tokens: int | None,
+    top_p: float | None,
+    stop: Any | None,
+    frequency_penalty: float | None = None,
+    presence_penalty: float | None = None,
+) -> AsyncGenerator[dict[str, Any], None]:
     pl = build_ollama_payload(
         model, msgs,
         temperature=temperature, max_tokens=max_tokens, top_p=top_p,
@@ -146,14 +146,14 @@ async def ollama_chat_stream(
 
 async def run_model_once(
     model: str,
-    msgs: List[Dict[str, Any]],
+    msgs: list[dict[str, Any]],
     *,
     temperature: float,
-    max_tokens: Optional[int],
-    top_p: Optional[float],
-    stop: Optional[Any],
-    frequency_penalty: Optional[float] = None,
-    presence_penalty: Optional[float] = None,
+    max_tokens: int | None,
+    top_p: float | None,
+    stop: Any | None,
+    frequency_penalty: float | None = None,
+    presence_penalty: float | None = None,
 ) -> str:
     d = await ollama_chat_once(
         model, msgs,
@@ -169,15 +169,15 @@ async def run_model_once(
 
 async def run_model_with_tools(
     model: str,
-    msgs: List[Dict[str, Any]],
+    msgs: list[dict[str, Any]],
     *,
     temperature: float,
-    max_tokens: Optional[int],
-    top_p: Optional[float],
-    stop: Optional[Any],
-    frequency_penalty: Optional[float] = None,
-    presence_penalty: Optional[float] = None,
-    max_tool_rounds: Optional[int] = None,
+    max_tokens: int | None,
+    top_p: float | None,
+    stop: Any | None,
+    frequency_penalty: float | None = None,
+    presence_penalty: float | None = None,
+    max_tool_rounds: int | None = None,
 ) -> str:
     content, _ = await run_model_with_tools_detailed(
         model,
@@ -195,16 +195,16 @@ async def run_model_with_tools(
 
 async def run_model_with_tools_detailed(
     model: str,
-    msgs: List[Dict[str, Any]],
+    msgs: list[dict[str, Any]],
     *,
     temperature: float,
-    max_tokens: Optional[int],
-    top_p: Optional[float],
-    stop: Optional[Any],
-    frequency_penalty: Optional[float] = None,
-    presence_penalty: Optional[float] = None,
-    max_tool_rounds: Optional[int] = None,
-) -> Tuple[str, List[Dict[str, Any]]]:
+    max_tokens: int | None,
+    top_p: float | None,
+    stop: Any | None,
+    frequency_penalty: float | None = None,
+    presence_penalty: float | None = None,
+    max_tool_rounds: int | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
     """Run a model with tool-calling support via the tool registry.
 
     Falls back to run_model_once when:

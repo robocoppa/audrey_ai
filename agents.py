@@ -8,7 +8,7 @@ and adaptive escalation from fast path to deep panel.
 import asyncio
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import state
 from classifier import _extract_json
@@ -58,14 +58,37 @@ For decomposition, return:
 
 
 async def plan_sub_tasks(
-    msgs: List[Dict[str, Any]], task_type: str
-) -> Optional[List[str]]:
+    msgs: list[dict[str, Any]],
+    task_type: str,
+    *,
+    audrey_mode: str = "balanced",
+    planning_enabled_override: bool | None = None,
+    min_tokens_override: int | None = None,
+) -> list[str] | None:
     """Use the router model to optionally decompose a complex query."""
-    if not PLANNING_ENABLED:
+    planning_enabled = (
+        planning_enabled_override
+        if planning_enabled_override is not None
+        else PLANNING_ENABLED
+    )
+    if audrey_mode == "quick":
+        planning_enabled = False
+    elif audrey_mode == "research":
+        planning_enabled = True
+
+    if not planning_enabled:
         return None
 
     user_text = get_last_user_text(msgs)
-    if estimate_tokens(user_text) < PLANNING_MIN_TOKENS:
+    min_tokens = (
+        int(min_tokens_override)
+        if min_tokens_override is not None
+        else PLANNING_MIN_TOKENS
+    )
+    if audrey_mode == "research":
+        min_tokens = min(min_tokens, 40)
+
+    if estimate_tokens(user_text) < min_tokens:
         return None
 
     try:
@@ -111,9 +134,9 @@ Return strict JSON (no fences):
 
 
 async def reflect_on_response(
-    original_msgs: List[Dict[str, Any]],
+    original_msgs: list[dict[str, Any]],
     response_text: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Use the router model to check if the response adequately answers the question."""
     if not REFLECTION_ENABLED:
         return {"complete": True, "quality": "good", "missing": ""}
@@ -183,7 +206,7 @@ Be thorough but efficient — use tools only when they add value.
 Do NOT wrap your entire response in a code block or code fence. Use code fences only for actual code snippets. Output clean markdown directly."""
 
 
-async def run_react_agent(s: Dict[str, Any]) -> Dict[str, Any]:
+async def run_react_agent(s: dict[str, Any]) -> dict[str, Any]:
     """ReAct loop — think, act, observe, repeat.
 
     Guards:
@@ -217,6 +240,9 @@ async def run_react_agent(s: Dict[str, Any]) -> Dict[str, Any]:
 
         if model_can_use_tools:
             tool_defs = state.tool_registry.tool_definitions
+            max_rounds = s.get("react_max_rounds_override")
+            if max_rounds is None:
+                max_rounds = REACT_MAX_ROUNDS
 
             async def chat_fn(current_msgs):
                 return await ollama_chat_once(
@@ -230,7 +256,7 @@ async def run_react_agent(s: Dict[str, Any]) -> Dict[str, Any]:
                 state.tool_registry.run_with_tools(
                     chat_fn,
                     msgs,
-                    max_rounds=REACT_MAX_ROUNDS,
+                    max_rounds=max(1, int(max_rounds)),
                 ),
                 timeout=FAST_PATH_TIMEOUT,
             )
@@ -286,7 +312,7 @@ async def run_react_agent(s: Dict[str, Any]) -> Dict[str, Any]:
 #  Adaptive escalation — check quality and escalate if needed
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def adaptive_escalate(s: Dict[str, Any]) -> Dict[str, Any]:
+async def adaptive_escalate(s: dict[str, Any]) -> dict[str, Any]:
     """After fast path, check if response quality warrants escalation."""
     if not s.get("use_fast_path") or not s.get("result_text"):
         s["escalated"] = not s.get("result_text", "")
@@ -315,7 +341,11 @@ async def adaptive_escalate(s: Dict[str, Any]) -> Dict[str, Any]:
             return s
 
     # Reflection gate
-    if REFLECTION_ENABLED:
+    reflection_enabled = s.get("reflection_enabled_override")
+    if reflection_enabled is None:
+        reflection_enabled = REFLECTION_ENABLED
+
+    if reflection_enabled:
         reflection = await reflect_on_response(
             s.get("original_messages", s["messages"]),
             result,
@@ -324,7 +354,10 @@ async def adaptive_escalate(s: Dict[str, Any]) -> Dict[str, Any]:
 
         if not reflection["complete"] or reflection["quality"] == "poor":
             retries = s.get("reflection_retries", 0)
-            if retries < REFLECTION_MAX_RETRIES:
+            retries_limit = s.get("reflection_max_retries_override")
+            if retries_limit is None:
+                retries_limit = REFLECTION_MAX_RETRIES
+            if retries < retries_limit:
                 logger.info(
                     "Reflection: incomplete (missing: %s) — retry %d",
                     reflection["missing"][:60],

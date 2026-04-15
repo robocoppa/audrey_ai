@@ -8,7 +8,7 @@ by every other module.
 
 import asyncio
 import time
-from typing import Any, Dict, Optional, Set
+from typing import Any
 
 import aiohttp
 
@@ -16,20 +16,20 @@ from config import GPU_CONCURRENCY
 from tool_registry import ToolRegistry
 
 # Async HTTP sessions (set in main.lifespan)
-ollama_session: Optional[aiohttp.ClientSession] = None
-ext_session: Optional[aiohttp.ClientSession] = None
+ollama_session: aiohttp.ClientSession | None = None
+ext_session: aiohttp.ClientSession | None = None
 
 # Tool registry (set in main.lifespan)
-tool_registry: Optional[ToolRegistry] = None
+tool_registry: ToolRegistry | None = None
 
 # GPU concurrency gate — serialises local-model inference
 gpu_semaphore: asyncio.Semaphore = asyncio.Semaphore(GPU_CONCURRENCY)
 
 # Models actually present in Ollama (populated by validate_models)
-available_models: Set[str] = set()
+available_models: set[str] = set()
 
 # Last observed audrey_fast routing outcome (used by /health).
-audrey_fast_health: Dict[str, Any] = {
+audrey_fast_health: dict[str, Any] = {
     "selected_model": "none",
     "last_status": "unknown",
     "last_reason": "no audrey_fast requests yet",

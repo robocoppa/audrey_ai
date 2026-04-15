@@ -9,14 +9,35 @@ import time
 import re
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from config import TIMEOUTS, is_cloud_model
 
 
+AUDREY_MODES = {"quick", "balanced", "research"}
+
+_TIME_SENSITIVE_PATTERNS = [
+    re.compile(
+        r"\b(today|tonight|yesterday|this week|this month|right now|currently|latest|recent)\b",
+        re.I,
+    ),
+    re.compile(r"\b(who is|who are)\b.{0,30}\b(current|president|ceo|mayor)\b", re.I),
+    re.compile(
+        r"\b(what is the|what's the)\b.{0,20}\b(price|score|weather|rate|status)\b",
+        re.I,
+    ),
+    re.compile(r"\b(when is|when does|when will)\b", re.I),
+    re.compile(r"\b(news|headline|update|announcement|released|launched)\b", re.I),
+    re.compile(r"\b(stock|market|crypto|bitcoin)\b.{0,20}\b(price|value|worth)\b", re.I),
+    re.compile(r"\b(score|won|lost|beat|defeated|playoff|standings)\b", re.I),
+    re.compile(r"\b(election|voted|poll|ballot)\b", re.I),
+    re.compile(r"\b20(2[5-9]|[3-9]\d)\b"),
+]
+
+
 # ── Request state / model options ────────────────────────────────────────────
 
-def ensure_state_defaults(state: Dict[str, Any]) -> Dict[str, Any]:
+def ensure_state_defaults(state: dict[str, Any]) -> dict[str, Any]:
     """Populate optional state fields used across fast and deep flows."""
     state.setdefault("errors", [])
     state.setdefault("prompt_tokens", 0)
@@ -33,6 +54,17 @@ def ensure_state_defaults(state: Dict[str, Any]) -> Dict[str, Any]:
     state.setdefault("escalated", False)
     state.setdefault("tools_used", [])
     state.setdefault("is_code_review", False)
+    state.setdefault("audrey_mode", "balanced")
+    state.setdefault("timeline", [])
+    state.setdefault("cache_hit", False)
+    state.setdefault("needs_fresh_data", False)
+    state.setdefault("fast_path_confidence", None)
+    state.setdefault("force_deep_profile", False)
+    state.setdefault("planning_enabled_override", None)
+    state.setdefault("planning_min_tokens_override", None)
+    state.setdefault("reflection_enabled_override", None)
+    state.setdefault("reflection_max_retries_override", None)
+    state.setdefault("react_max_rounds_override", None)
     return state
 
 
@@ -40,20 +72,22 @@ def build_initial_state(
     *,
     request_id: str,
     requested_model: str,
-    messages: List[Dict[str, Any]],
+    messages: list[dict[str, Any]],
+    audrey_mode: str,
     stream: bool,
     temperature: float,
-    max_tokens: Optional[int],
-    top_p: Optional[float],
-    stop: Optional[Any],
-    frequency_penalty: Optional[float],
-    presence_penalty: Optional[float],
-) -> Dict[str, Any]:
+    max_tokens: int | None,
+    top_p: float | None,
+    stop: Any | None,
+    frequency_penalty: float | None,
+    presence_penalty: float | None,
+) -> dict[str, Any]:
     """Build the shared initial pipeline state for a request."""
     state = {
         "request_id": request_id,
         "requested_model": requested_model,
         "messages": messages,
+        "audrey_mode": normalize_audrey_mode(audrey_mode),
         "stream": stream,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -66,11 +100,95 @@ def build_initial_state(
     return ensure_state_defaults(state)
 
 
-def model_call_kwargs(
-    state: Dict[str, Any],
+def normalize_audrey_mode(mode: str | None) -> str:
+    raw = str(mode or "balanced").strip().lower()
+    return raw if raw in AUDREY_MODES else "balanced"
+
+
+def is_time_sensitive_query(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return False
+    for pattern in _TIME_SENSITIVE_PATTERNS:
+        if pattern.search(candidate):
+            return True
+    return False
+
+
+def append_timeline_event(
+    state: dict[str, Any],
     *,
-    temperature: Optional[float] = None,
-) -> Dict[str, Any]:
+    stage: str,
+    message: str,
+    status: str = "info",
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "at_ms": int(time.time() * 1000),
+        "stage": stage,
+        "status": status,
+        "message": message,
+    }
+    if details:
+        event["details"] = details
+    state.setdefault("timeline", []).append(event)
+    return event
+
+
+def build_trust_signals(state: dict[str, Any]) -> dict[str, Any]:
+    tools_used = state.get("tools_used", []) or []
+    distinct_tools = sorted(
+        {
+            str(item.get("tool", "")).split("__", 1)[-1]
+            for item in tools_used
+            if item.get("tool")
+        }
+    )
+    source_count = 0
+    for item in tools_used:
+        try:
+            source_count += int(item.get("result_url_count", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+
+    freshness = "cached" if state.get("cache_hit") else (
+        "live_web" if state.get("search_performed") else "model_only"
+    )
+    if (
+        state.get("needs_fresh_data")
+        and not state.get("search_performed")
+        and not state.get("cache_hit")
+    ):
+        freshness = "potentially_stale"
+
+    path = "deep"
+    if state.get("cache_hit"):
+        path = "cache"
+    elif state.get("requested_model") == "audrey_fast" or state.get("use_fast_path"):
+        path = "fast"
+
+    return {
+        "path": path,
+        "confidence": round(float(state.get("confidence", 0.0) or 0.0), 3),
+        "freshness": freshness,
+        "search_used": bool(state.get("search_performed")),
+        "search_query": str(state.get("search_query", "") or ""),
+        "tools_used_count": len(tools_used),
+        "tools_used": distinct_tools,
+        "source_count": source_count,
+        "reflection_quality": str(
+            (state.get("reflection_result") or {}).get("quality", "n/a")
+        ),
+        "escalated": bool(state.get("escalated", False)),
+        "cache_hit": bool(state.get("cache_hit", False)),
+    }
+
+
+def model_call_kwargs(
+    state: dict[str, Any],
+    *,
+    temperature: float | None = None,
+) -> dict[str, Any]:
     """Shared generation kwargs for model calls."""
     return {
         "temperature": state["temperature"] if temperature is None else temperature,
@@ -112,7 +230,7 @@ def estimate_tokens(text: str) -> int:
 
 # ── Message helpers ──────────────────────────────────────────────────────────
 
-def flatten_messages(msgs: List[Dict[str, Any]]) -> str:
+def flatten_messages(msgs: list[dict[str, Any]]) -> str:
     parts = []
     for m in msgs:
         c = m.get("content", "")
@@ -129,7 +247,7 @@ def flatten_messages(msgs: List[Dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
-def extract_web_search_info(tool_calls_log: List[Dict[str, Any]]) -> tuple[bool, str]:
+def extract_web_search_info(tool_calls_log: list[dict[str, Any]]) -> tuple[bool, str]:
     """Return (used_web_search, query) from tool observability logs."""
     if not tool_calls_log:
         return False, ""
@@ -166,7 +284,7 @@ def extract_web_search_info(tool_calls_log: List[Dict[str, Any]]) -> tuple[bool,
     return False, ""
 
 
-def has_vision_content(msgs: List[Dict[str, Any]]) -> bool:
+def has_vision_content(msgs: list[dict[str, Any]]) -> bool:
     for m in msgs:
         c = m.get("content")
         if isinstance(c, list):
@@ -176,7 +294,7 @@ def has_vision_content(msgs: List[Dict[str, Any]]) -> bool:
     return False
 
 
-def get_last_user_text(msgs: List[Dict[str, Any]]) -> str:
+def get_last_user_text(msgs: list[dict[str, Any]]) -> str:
     """Extract the text of the last user message."""
     for m in reversed(msgs):
         if m.get("role") == "user":
@@ -192,7 +310,7 @@ def get_last_user_text(msgs: List[Dict[str, Any]]) -> str:
 
 # ── Datetime injection ───────────────────────────────────────────────────────
 
-def _datetime_system_message() -> Dict[str, str]:
+def _datetime_system_message() -> dict[str, str]:
     now = datetime.now()
     utcnow = datetime.now(timezone.utc)
     return {
@@ -206,7 +324,7 @@ def _datetime_system_message() -> Dict[str, str]:
     }
 
 
-def inject_datetime(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def inject_datetime(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Prepend a datetime system message to the conversation."""
     return [_datetime_system_message()] + messages
 

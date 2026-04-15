@@ -16,7 +16,7 @@ import json
 import logging
 import re
 import traceback
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable
 
 import aiohttp
 
@@ -35,12 +35,12 @@ COMPRESS_MAX_RESULT_CHARS = REACT_COMPRESS_MAX_CHARS
 class ToolServer:
     """A single discovered OpenAPI tool server."""
 
-    def __init__(self, name: str, url: str, spec: Dict[str, Any]):
+    def __init__(self, name: str, url: str, spec: dict[str, Any]):
         self.name = name
         self.url = url.rstrip("/")
         self.spec = spec
-        self.tools: List[Dict[str, Any]] = []
-        self.endpoints: Dict[str, Dict[str, Any]] = {}
+        self.tools: list[dict[str, Any]] = []
+        self.endpoints: dict[str, dict[str, Any]] = {}
         self._parse_spec()
 
     def _parse_spec(self) -> None:
@@ -61,7 +61,7 @@ class ToolServer:
                 )
 
                 # ── Build parameters schema ──
-                parameters: Dict[str, Any] = {
+                parameters: dict[str, Any] = {
                     "type": "object",
                     "properties": {},
                 }
@@ -113,7 +113,7 @@ class ToolServer:
             ", ".join(e.rsplit("__", 1)[-1] for e in self.endpoints),
         )
 
-    def _resolve_ref(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+    def _resolve_ref(self, schema: dict[str, Any]) -> dict[str, Any]:
         ref = schema.get("$ref", "")
         if ref.startswith("#/components/schemas/"):
             resolved = (
@@ -142,11 +142,11 @@ def _truncate_tool_result(result_text: str, max_chars: int) -> str:
 
 
 def compress_tool_context(
-    messages: List[Dict[str, Any]],
+    messages: list[dict[str, Any]],
     *,
     preserve_last_n: int = 2,
     max_result_chars: int = COMPRESS_MAX_RESULT_CHARS,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Compress older tool call/result pairs into a summary to save context space.
 
     Keeps the original system + user messages intact, compresses intermediate
@@ -272,11 +272,11 @@ def compress_tool_context(
 class ToolRegistry:
     """Discovers and manages multiple OpenAPI tool servers."""
 
-    def __init__(self, session: Optional[aiohttp.ClientSession] = None) -> None:
-        self.servers: Dict[str, ToolServer] = {}
-        self._session: Optional[aiohttp.ClientSession] = session
-        self._all_tools: List[Dict[str, Any]] = []
-        self._server_configs: List[Dict[str, Any]] = []
+    def __init__(self, session: aiohttp.ClientSession | None = None) -> None:
+        self.servers: dict[str, ToolServer] = {}
+        self._session: aiohttp.ClientSession | None = session
+        self._all_tools: list[dict[str, Any]] = []
+        self._server_configs: list[dict[str, Any]] = []
 
     def set_session(self, session: aiohttp.ClientSession) -> None:
         self._session = session
@@ -284,7 +284,7 @@ class ToolRegistry:
     # ── Properties expected by main.py ───────────────────────────────────
 
     @property
-    def tool_definitions(self) -> List[Dict[str, Any]]:
+    def tool_definitions(self) -> list[dict[str, Any]]:
         return self._all_tools
 
     @property
@@ -296,17 +296,17 @@ class ToolRegistry:
         return len(self._all_tools)
 
     @property
-    def tool_names(self) -> List[str]:
+    def tool_names(self) -> list[str]:
         return [t["function"]["name"] for t in self._all_tools]
 
     @property
-    def server_info(self) -> Dict[str, Any]:
+    def server_info(self) -> dict[str, Any]:
         return {
             name: {"url": s.url, "tools": len(s.tools)}
             for name, s in self.servers.items()
         }
 
-    def status(self) -> Dict[str, Any]:
+    def status(self) -> dict[str, Any]:
         return {
             "servers": self.server_info,
             "total_tools": self.tool_count,
@@ -316,8 +316,8 @@ class ToolRegistry:
 
     @staticmethod
     def _normalize_configs(
-        raw: List[Union[str, Dict[str, Any]]]
-    ) -> List[Dict[str, Any]]:
+        raw: list[str | dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """Accept both plain URL strings and {url, name} dicts from config."""
         out = []
         for item in raw:
@@ -330,7 +330,7 @@ class ToolRegistry:
         return out
 
     async def discover(
-        self, server_configs: List[Union[str, Dict[str, Any]]]
+        self, server_configs: list[str | dict[str, Any]]
     ) -> None:
         normalized = self._normalize_configs(server_configs)
         self._server_configs = normalized
@@ -366,7 +366,7 @@ class ToolRegistry:
             len(self.servers), len(self._all_tools),
         )
 
-    async def _fetch_spec(self, url: str) -> Optional[Dict[str, Any]]:
+    async def _fetch_spec(self, url: str) -> dict[str, Any] | None:
         assert self._session, "HTTP session not set — call set_session() first"
         for path in ("/openapi.json", "/openapi.yaml", "/.well-known/openapi.json"):
             try:
@@ -386,7 +386,7 @@ class ToolRegistry:
 
     async def rediscover(
         self,
-        server_configs: Optional[List[Union[str, Dict[str, Any]]]] = None,
+        server_configs: list[str | dict[str, Any]] | None = None,
     ) -> None:
         """Re-discover tools. Uses stored configs if none provided."""
         configs = server_configs if server_configs is not None else [
@@ -399,7 +399,7 @@ class ToolRegistry:
 
     # ── Dispatch ─────────────────────────────────────────────────────────
 
-    async def execute(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+    async def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
         for server in self.servers.values():
             if tool_name in server.endpoints:
                 return await self._call(
@@ -410,8 +410,8 @@ class ToolRegistry:
     async def _call(
         self,
         server: ToolServer,
-        endpoint: Dict[str, Any],
-        arguments: Dict[str, Any],
+        endpoint: dict[str, Any],
+        arguments: dict[str, Any],
     ) -> str:
         assert self._session
         method = endpoint["method"]
@@ -424,7 +424,7 @@ class ToolRegistry:
                 url = url.replace(ph, str(arguments.pop(key)))
 
         try:
-            kw: Dict[str, Any] = {"timeout": aiohttp.ClientTimeout(total=30)}
+            kw: dict[str, Any] = {"timeout": aiohttp.ClientTimeout(total=30)}
             if method in ("post", "put", "patch"):
                 kw["json"] = arguments
             elif arguments:
@@ -450,11 +450,11 @@ class ToolRegistry:
     async def run_with_tools(
         self,
         chat_fn: Callable,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         *,
         compress_enabled: bool = True,
-        max_rounds: Optional[int] = None,
-    ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
+        max_rounds: int | None = None,
+    ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
         """
         Run a model with tool calling.  Loops until the model responds with
         plain text or the configured max tool rounds is reached.
@@ -473,7 +473,7 @@ class ToolRegistry:
                   the payload built by chat_fn.
         """
         current = list(messages)
-        tool_calls_log: List[Dict[str, Any]] = []  # Track for observability
+        tool_calls_log: list[dict[str, Any]] = []  # Track for observability
         rounds_limit = max(1, int(max_rounds)) if max_rounds is not None else MAX_TOOL_ROUNDS
 
         for round_num in range(rounds_limit):
@@ -581,22 +581,59 @@ class ToolRegistry:
                 if query is None:
                     query = ""
                 query = str(query)
+                result_url_count = 0
+                if "web_search" in name.lower():
+                    try:
+                        parsed_result = json.loads(result)
+                        rows = (
+                            parsed_result.get("results", [])
+                            if isinstance(parsed_result, dict)
+                            else []
+                        )
+                        if isinstance(rows, list):
+                            result_url_count = sum(
+                                1
+                                for row in rows
+                                if isinstance(row, dict) and row.get("url")
+                            )
+                    except (json.JSONDecodeError, TypeError):
+                        result_url_count = 0
                 tool_calls_log.append({
                     "round": round_num + 1,
                     "tool": name,
                     "query": query[:200],
                     "args_preview": json.dumps(args, default=str)[:100],
                     "result_len": len(result),
+                    "result_url_count": result_url_count,
                 })
 
         logger.warning("Max tool rounds (%d) reached", rounds_limit)
-        # Final compression before the last attempt
+        # Final compression + one synthesis attempt without additional tool usage.
         if compress_enabled:
             current = compress_tool_context(current)
-        data = await chat_fn(current)
+        final_prompt = {
+            "role": "user",
+            "content": (
+                "Tool-call budget is exhausted. Do not call any tools. "
+                "Using the tool results already in this conversation, provide "
+                "the best complete final answer."
+            ),
+        }
+        data = await chat_fn([*current, final_prompt])
         msg = data.get("message", {}) if isinstance(data, dict) else {}
+        final_text = str(msg.get("content", "") or "").strip()
+        if final_text:
+            return final_text, current, tool_calls_log
+        if msg.get("tool_calls"):
+            logger.warning(
+                "Model requested additional tools after max rounds; returning best-effort fallback"
+            )
+        fallback = (
+            "I hit the tool-call budget before finishing. "
+            "Please retry, or reduce scope so I can complete within fewer tool rounds."
+        )
         return (
-            msg.get("content", "") or "[Tool rounds exhausted]",
+            fallback,
             current,
             tool_calls_log,
         )

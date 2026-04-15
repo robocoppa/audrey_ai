@@ -16,7 +16,7 @@ import sqlite3
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import aiohttp
 from fastapi import FastAPI
@@ -36,7 +36,7 @@ PYTHON_TIMEOUT = int(os.getenv("TOOLS_PYTHON_TIMEOUT", "30"))
 PYTHON_MAX_OUTPUT = int(os.getenv("TOOLS_PYTHON_MAX_OUTPUT", "10000"))
 DOC_MAX_CHARS = int(os.getenv("TOOLS_DOC_MAX_CHARS", "50000"))
 
-_http_session: Optional[aiohttp.ClientSession] = None
+_http_session: aiohttp.ClientSession | None = None
 
 # ── App ──────────────────────────────────────────────────────────────────────
 
@@ -219,7 +219,7 @@ async def ep_run_python(req: PythonRunRequest):
 @app.get("/system_stats", summary="Get CPU, memory, disk, and GPU usage",
          operation_id="system_stats")
 async def ep_system_stats():
-    stats: Dict[str, Any] = {"timestamp": datetime.utcnow().isoformat(),
+    stats: dict[str, Any] = {"timestamp": datetime.utcnow().isoformat(),
                               "platform": platform.platform(),
                               "cpu": {}, "memory": {}, "disk": {}, "gpu": []}
     try:
@@ -275,7 +275,7 @@ async def ep_system_stats():
 def _safe_path(user_path: str) -> Path:
     base = Path(SANDBOX_DIR).resolve()
     target = (base / user_path).resolve()
-    if not str(target).startswith(str(base)):
+    if not target.is_relative_to(base):
         raise ValueError(f"Path escapes sandbox: {user_path}")
     return target
 

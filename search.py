@@ -7,7 +7,7 @@ search backends, and result formatting for injection into the conversation.
 
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any
 
 import aiohttp
 
@@ -78,7 +78,7 @@ def extract_search_query(text: str) -> str:
 
 # ── SearXNG backend ──────────────────────────────────────────────────────────
 
-async def searxng_search(query: str) -> List[Dict[str, str]]:
+async def searxng_search(query: str) -> list[dict[str, str]]:
     try:
         async with state.ext_session.get(
             f"{SEARXNG_URL}/search",
@@ -103,7 +103,7 @@ async def searxng_search(query: str) -> List[Dict[str, str]]:
 
 # ── Brave backend ────────────────────────────────────────────────────────────
 
-async def brave_search(query: str) -> List[Dict[str, str]]:
+async def brave_search(query: str) -> list[dict[str, str]]:
     if not BRAVE_API_KEY:
         return []
     try:
@@ -134,13 +134,13 @@ async def brave_search(query: str) -> List[Dict[str, str]]:
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
-async def web_search(query: str) -> List[Dict[str, str]]:
+async def web_search(query: str) -> list[dict[str, str]]:
     if SEARCH_BACKEND == "searxng":
         return await searxng_search(query)
     return await brave_search(query)
 
 
-def format_search_results(results: List[Dict[str, str]]) -> str:
+def format_search_results(results: list[dict[str, str]]) -> str:
     if not results:
         return ""
     parts = ["Here are recent web search results:\n"]

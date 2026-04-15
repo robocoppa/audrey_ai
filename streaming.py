@@ -38,6 +38,18 @@ def _sc_stop(rid: str, created: int, model_name: str) -> str:
     )
 
 
+def _sc_event(rid: str, created: int, model_name: str, event: dict[str, Any]) -> str:
+    payload = {
+        "id": rid,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model_name,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+        "audrey_event": event,
+    }
+    return f"data: {json.dumps(payload)}\n\n"
+
+
 def _resolve_sid_ct(
     state: dict[str, Any],
     rid: str | None,

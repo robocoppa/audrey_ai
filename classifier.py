@@ -8,7 +8,7 @@ and fast-model selection from the model registry.
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from config import (
     COMPLEXITY_FORCE_DEEP,
@@ -154,7 +154,7 @@ _REVIEW_OVERRIDE = re.compile(
 #  Keyword pre-filter
 # ══════════════════════════════════════════════════════════════════════════════
 
-def keyword_prefilter(text: str, *, user_text: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def keyword_prefilter(text: str, *, user_text: str | None = None) -> dict[str, Any] | None:
     """Expanded keyword pre-filter — catches patterns to reduce router calls.
 
     Args:
@@ -274,7 +274,7 @@ User: "Explain why quicksort has O(n log n) average case complexity"
 Now classify the following request. Output ONLY the JSON object:"""
 
 
-def _extract_json(raw: str) -> Optional[dict]:
+def _extract_json(raw: str) -> dict | None:
     """Robustly extract a JSON object from model output."""
     if not raw or not raw.strip():
         return None
@@ -324,7 +324,7 @@ def _extract_json(raw: str) -> Optional[dict]:
 
 # ── Keyword fallback (when router model fails) ──────────────────────────────
 
-def _keyword_fallback_classify(text: str) -> Dict[str, Any]:
+def _keyword_fallback_classify(text: str) -> dict[str, Any]:
     """Last-resort classification using simple keyword counts."""
     text_lower = text.lower()
 
@@ -385,7 +385,7 @@ def _keyword_fallback_classify(text: str) -> Dict[str, Any]:
 #  Main classifier
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def classify_request(msgs: List[Dict[str, Any]]) -> Dict[str, Any]:
+async def classify_request(msgs: list[dict[str, Any]]) -> dict[str, Any]:
     if has_vision_content(msgs):
         return {
             "task_type": "vl",
@@ -473,10 +473,10 @@ async def classify_request(msgs: List[Dict[str, Any]]) -> Dict[str, Any]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def should_force_deep(
-    messages: List[Dict[str, Any]],
+    messages: list[dict[str, Any]],
     confidence: float,
     task_type: str,
-) -> Optional[str]:
+) -> str | None:
     """Return a reason string if the input is too complex for fast path, else None.
 
     Checks:
@@ -497,7 +497,7 @@ def should_force_deep(
 #  Fast-model selection from model registry
 # ══════════════════════════════════════════════════════════════════════════════
 
-def select_fast_model(task_type: str) -> Optional[str]:
+def select_fast_model(task_type: str) -> str | None:
     """Pick the highest-priority healthy model for a task type."""
     candidates = MODEL_REGISTRY.get(task_type, MODEL_REGISTRY.get("general", []))
     for entry in sorted(candidates, key=lambda e: e.get("priority", 0), reverse=True):

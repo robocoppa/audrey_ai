@@ -7,14 +7,14 @@ unhealthy models are temporarily skipped during routing.
 
 import logging
 import time
-from typing import Any, Dict
+from typing import Any
 
 logger = logging.getLogger("audrey.health")
 
-MODEL_HEALTH: Dict[str, Dict[str, Any]] = {}
+MODEL_HEALTH: dict[str, dict[str, Any]] = {}
 
 
-def health_record(name: str) -> Dict[str, Any]:
+def health_record(name: str) -> dict[str, Any]:
     if name not in MODEL_HEALTH:
         MODEL_HEALTH[name] = {"failures": 0, "last_failure": None, "cooldown_until": 0}
     return MODEL_HEALTH[name]

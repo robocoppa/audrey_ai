@@ -12,7 +12,7 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
-from typing import Any, AsyncGenerator, Awaitable, Dict, List
+from typing import Any, AsyncGenerator, Awaitable
 
 import aiohttp
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -27,14 +27,18 @@ from config import (
     DEFAULT_TEMPERATURE,
     EMIT_ROUTING_BANNER,
     EMIT_STATUS_UPDATES,
+    EMIT_TIMELINE_EVENTS,
+    EMIT_TRUST_SIGNALS,
     ESCALATION_ENABLED,
     FAST_PATH_ENABLED,
+    FAST_PATH_CONFIDENCE,
     MAX_DEEP_WORKERS,
     MAX_DEEP_WORKERS_CLOUD,
     OLLAMA_BASE_URL,
     PLANNING_ENABLED,
     REACT_MAX_ROUNDS,
     REFLECTION_ENABLED,
+    REFLECTION_MAX_RETRIES,
     ROUTER_MODEL,
     SEARCH_BACKEND,
     STREAM_HEARTBEAT_SECONDS,
@@ -43,18 +47,25 @@ from config import (
     is_cloud_model,
 )
 from helpers import estimate_tokens, flatten_messages
-from helpers import build_initial_state
+from helpers import (
+    append_timeline_event,
+    build_initial_state,
+    build_trust_signals,
+    get_last_user_text,
+    is_time_sensitive_query,
+    normalize_audrey_mode,
+)
 from models import ChatCompletionRequest
 from pipeline import (
     FAST_GRAPH,
-    PREP_GRAPH,
-    SYNTH_GRAPH,
     node_classify,
     node_parallel_generate,
     node_plan_panel,
     node_prepare_synthesis,
+    node_reflect_deep,
+    node_synthesize,
 )
-from streaming import _SSE_DONE, _sc, _sc_stop, banner, stream_synthesis
+from streaming import _SSE_DONE, _sc, _sc_event, _sc_stop, banner, stream_synthesis
 from tool_registry import ToolRegistry
 
 logging.basicConfig(
@@ -74,6 +85,114 @@ def _log_safe_query(query: str | None) -> str:
     """Return a log-safe version of a search query (masks content, keeps length)."""
     q = str(query or "").strip()
     return f"[redacted:{len(q)} chars]" if q else ""
+
+
+def _apply_mode_overrides(state_obj: dict[str, Any]) -> dict[str, Any]:
+    mode = normalize_audrey_mode(state_obj.get("audrey_mode"))
+    state_obj["audrey_mode"] = mode
+
+    # Balanced defaults.
+    state_obj["fast_path_confidence"] = FAST_PATH_CONFIDENCE
+    state_obj["force_deep_profile"] = False
+    state_obj["planning_enabled_override"] = PLANNING_ENABLED
+    state_obj["planning_min_tokens_override"] = None
+    state_obj["reflection_enabled_override"] = REFLECTION_ENABLED
+    state_obj["reflection_max_retries_override"] = REFLECTION_MAX_RETRIES
+    state_obj["react_max_rounds_override"] = REACT_MAX_ROUNDS
+
+    if mode == "quick":
+        state_obj["fast_path_confidence"] = min(FAST_PATH_CONFIDENCE, 0.62)
+        state_obj["planning_enabled_override"] = False
+        state_obj["reflection_enabled_override"] = False
+        state_obj["reflection_max_retries_override"] = 0
+        state_obj["react_max_rounds_override"] = 1
+    elif mode == "research":
+        state_obj["fast_path_confidence"] = max(FAST_PATH_CONFIDENCE, 0.90)
+        state_obj["force_deep_profile"] = state_obj.get("requested_model") == "audrey_deep"
+        state_obj["planning_enabled_override"] = True
+        state_obj["planning_min_tokens_override"] = 40
+        state_obj["reflection_enabled_override"] = True
+        state_obj["reflection_max_retries_override"] = max(2, REFLECTION_MAX_RETRIES)
+        state_obj["react_max_rounds_override"] = max(4, REACT_MAX_ROUNDS)
+    return state_obj
+
+
+def _timeline(
+    state_obj: dict[str, Any],
+    *,
+    stage: str,
+    message: str,
+    status: str = "info",
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return append_timeline_event(
+        state_obj,
+        stage=stage,
+        message=message,
+        status=status,
+        details=details,
+    )
+
+
+async def _run_deep_sequence(
+    state_obj: dict[str, Any],
+    *,
+    include_synthesis: bool,
+) -> dict[str, Any]:
+    s = state_obj
+    if not s.get("task_type"):
+        s = await node_classify(s)
+        _timeline(
+            s,
+            stage="classify",
+            message="Request classified for deep-panel route",
+            details={"task_type": s.get("task_type"), "confidence": s.get("confidence")},
+        )
+
+    s = await node_plan_panel(s)
+    _timeline(
+        s,
+        stage="plan",
+        message="Deep-panel workers and sub-tasks selected",
+        details={
+            "workers": len(s.get("deep_workers", [])),
+            "planned_sub_tasks": len(s.get("sub_tasks") or []),
+        },
+    )
+
+    s = await node_parallel_generate(s)
+    _timeline(
+        s,
+        stage="generate",
+        message="Worker drafts generated",
+        details={"outputs": len(s.get("worker_outputs", []))},
+    )
+
+    s = await node_prepare_synthesis(s)
+    _timeline(
+        s,
+        stage="prepare_synthesis",
+        message="Synthesis context prepared",
+    )
+
+    if include_synthesis:
+        s = await node_synthesize(s)
+        _timeline(
+            s,
+            stage="synthesize",
+            message="Drafts synthesized into final answer",
+            details={"selected_model": s.get("selected_model", s.get("synthesizer", ""))},
+        )
+        s = await node_reflect_deep(s)
+        rr = s.get("reflection_result", {})
+        if rr:
+            _timeline(
+                s,
+                stage="reflection",
+                message="Final answer evaluated by reflection gate",
+                details={"quality": rr.get("quality", "n/a")},
+            )
+    return s
 
 
 async def _await_stream_stage(
@@ -303,6 +422,10 @@ async def healthcheck():
                         "planning": PLANNING_ENABLED,
                         "escalation": ESCALATION_ENABLED,
                     },
+                    "ux": {
+                        "timeline_events": EMIT_TIMELINE_EVENTS,
+                        "trust_signals": EMIT_TRUST_SIGNALS,
+                    },
                     "max_workers": {
                         "local": MAX_DEEP_WORKERS,
                         "cloud": MAX_DEEP_WORKERS_CLOUD,
@@ -345,6 +468,7 @@ async def rediscover_tools():
 async def run_graph_dispatch(req, *, stream_prepare_only=False):
     msgs_raw = [m.model_dump() for m in req.messages]
     temp = req.temperature if req.temperature is not None else DEFAULT_TEMPERATURE
+    mode = normalize_audrey_mode(getattr(req, "audrey_mode", "balanced"))
     cache_kwargs = dict(
         max_tokens=req.max_tokens,
         top_p=req.top_p,
@@ -353,31 +477,11 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
         presence_penalty=req.presence_penalty,
     )
 
-    # Cache check
-    if CACHE_ENABLED and not req.stream:
-        cached = cache.get(msgs_raw, req.model, temp, **cache_kwargs)
-        if cached is not None:
-            logger.info("Cache hit for model=%s", req.model)
-            return {
-                "request_id": str(uuid.uuid4()),
-                "requested_model": req.model,
-                "result_text": cached,
-                "selected_model": "cache",
-                "task_type": "cached",
-                "confidence": 1.0,
-                "route_reason": "Cache hit",
-                "latency_ms": 0,
-                "prompt_tokens": estimate_tokens(flatten_messages(msgs_raw)),
-                "completion_tokens": estimate_tokens(cached),
-                "search_performed": False,
-                "use_fast_path": False,
-                "escalated": False,
-            }
-
     s = build_initial_state(
         request_id=str(uuid.uuid4()),
         requested_model=req.model,
         messages=msgs_raw,
+        audrey_mode=mode,
         stream=bool(req.stream),
         temperature=temp,
         max_tokens=req.max_tokens,
@@ -386,6 +490,56 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
         frequency_penalty=req.frequency_penalty,
         presence_penalty=req.presence_penalty,
     )
+    _apply_mode_overrides(s)
+    s["needs_fresh_data"] = is_time_sensitive_query(get_last_user_text(msgs_raw))
+    _timeline(
+        s,
+        stage="request_received",
+        message="Request accepted",
+        details={"mode": s["audrey_mode"], "stream": bool(req.stream)},
+    )
+
+    # Cache check (skipped for time-sensitive requests to avoid stale responses).
+    cache_allowed = (
+        CACHE_ENABLED
+        and not req.stream
+        and not stream_prepare_only
+        and not s["needs_fresh_data"]
+    )
+    if cache_allowed:
+        cached = cache.get(msgs_raw, req.model, temp, **cache_kwargs)
+        if cached is not None:
+            logger.info("Cache hit for model=%s", req.model)
+            s.update(
+                {
+                    "result_text": cached,
+                    "selected_model": "cache",
+                    "task_type": "cached",
+                    "confidence": 1.0,
+                    "route_reason": "Cache hit",
+                    "latency_ms": 0,
+                    "prompt_tokens": estimate_tokens(flatten_messages(msgs_raw)),
+                    "completion_tokens": estimate_tokens(cached),
+                    "search_performed": False,
+                    "use_fast_path": False,
+                    "escalated": False,
+                    "cache_hit": True,
+                }
+            )
+            _timeline(
+                s,
+                stage="cache",
+                message="Response served from cache",
+                status="success",
+            )
+            return s
+    elif CACHE_ENABLED and not req.stream and s["needs_fresh_data"]:
+        _timeline(
+            s,
+            stage="cache",
+            message="Cache bypassed for freshness-sensitive query",
+            details={"reason": "time_sensitive_query"},
+        )
 
     # Try fast path for audrey_deep (auto) and audrey_fast (fast-only).
     if (
@@ -393,11 +547,20 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
         and req.model in {"audrey_deep", "audrey_fast"}
         and not stream_prepare_only
     ):
+        _timeline(
+            s,
+            stage="fast_path",
+            message="Evaluating fast path",
+            details={"mode": s["audrey_mode"]},
+        )
         r = await FAST_GRAPH.ainvoke(s)
+        r.setdefault("timeline", s.get("timeline", []))
+        r["audrey_mode"] = s["audrey_mode"]
+        r["needs_fresh_data"] = s["needs_fresh_data"]
 
         if r.get("use_fast_path") and r.get("result_text") and not r.get("escalated"):
             r["latency_ms"] = int((time.time() - s["started_at"]) * 1000)
-            if CACHE_ENABLED:
+            if CACHE_ENABLED and not r.get("needs_fresh_data", False):
                 cache.put(msgs_raw, req.model, temp, r["result_text"], **cache_kwargs)
             if req.model == "audrey_fast":
                 state.update_audrey_fast_health(
@@ -433,6 +596,13 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
                     }
                 )
             )
+            _timeline(
+                r,
+                stage="complete",
+                message="Completed on fast path",
+                status="success",
+                details={"selected_model": r.get("selected_model", r.get("fast_model", ""))},
+            )
             return r
 
         if req.model == "audrey_fast":
@@ -464,13 +634,27 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
                     }
                 )
             )
+            _timeline(
+                r,
+                stage="complete",
+                message="Fast-only request fell back to user-visible failure message",
+                status="warning",
+            )
             return r
 
         # Fast path was skipped, failed, or escalated — fall through to deep panel
         s = {**r, "started_at": time.time()}
+        s.setdefault("timeline", r.get("timeline", []))
         if s.get("escalated"):
             logger.info(
                 "Escalated from fast→deep: %s", s.get("route_reason", "")
+            )
+            _timeline(
+                s,
+                stage="escalation",
+                message="Escalated from fast path to deep panel",
+                status="warning",
+                details={"reason": s.get("route_reason", "")},
             )
 
     # audrey_fast is fast-only and must never run the deep panel.
@@ -486,6 +670,12 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
             FAST_PATH_ENABLED,
             stream_prepare_only,
         )
+        _timeline(
+            s,
+            stage="complete",
+            message="Fast-only request returned fallback message",
+            status="warning",
+        )
         return {
             "request_id": s["request_id"],
             "requested_model": req.model,
@@ -500,15 +690,36 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
             "search_performed": False,
             "use_fast_path": False,
             "escalated": False,
+            "cache_hit": False,
+            "audrey_mode": s.get("audrey_mode", mode),
+            "needs_fresh_data": s.get("needs_fresh_data", False),
+            "timeline": s.get("timeline", []),
         }
 
-    # Deep panel path
-    g = PREP_GRAPH if stream_prepare_only else SYNTH_GRAPH
-    r = await g.ainvoke(s)
+    # Deep panel path (single classify pass, even after fast->deep escalation).
+    _timeline(
+        s,
+        stage="deep_path",
+        message="Running deep-panel pipeline",
+    )
+    r = await _run_deep_sequence(s, include_synthesis=not stream_prepare_only)
     r["latency_ms"] = int((time.time() - s["started_at"]) * 1000)
 
-    if CACHE_ENABLED and not stream_prepare_only and r.get("result_text"):
+    if (
+        CACHE_ENABLED
+        and not stream_prepare_only
+        and r.get("result_text")
+        and not r.get("needs_fresh_data", False)
+    ):
         cache.put(msgs_raw, req.model, temp, r["result_text"], **cache_kwargs)
+    r["cache_hit"] = bool(r.get("cache_hit", False))
+    _timeline(
+        r,
+        stage="complete",
+        message="Completed on deep panel",
+        status="success",
+        details={"selected_model": r.get("selected_model", r.get("synthesizer", ""))},
+    )
 
     logger.info(
         json.dumps(
@@ -525,6 +736,7 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
                 "search_query": _log_safe_query(r.get("search_query", "")),
                 "tools": [t.get("tool", "") for t in r.get("tools_used", [])],
                 "escalated": r.get("escalated", False),
+                "mode": r.get("audrey_mode", mode),
                 "ms": r["latency_ms"],
             }
         )
@@ -576,6 +788,7 @@ async def chat_completions(req: ChatCompletionRequest):
                     request_id=request_id,
                     requested_model=req.model,
                     messages=[m.model_dump() for m in req.messages],
+                    audrey_mode=normalize_audrey_mode(req.audrey_mode),
                     stream=True,
                     temperature=(
                         req.temperature
@@ -588,6 +801,37 @@ async def chat_completions(req: ChatCompletionRequest):
                     frequency_penalty=req.frequency_penalty,
                     presence_penalty=req.presence_penalty,
                 )
+                init_state = _apply_mode_overrides(init_state)
+                init_state["needs_fresh_data"] = is_time_sensitive_query(
+                    get_last_user_text(init_state["messages"])
+                )
+                start_evt = _timeline(
+                    init_state,
+                    stage="request_received",
+                    message="Streaming request accepted",
+                    details={"mode": init_state.get("audrey_mode", "balanced")},
+                )
+                if EMIT_TIMELINE_EVENTS:
+                    yield _sc_event(rid, ct, req.model, start_evt)
+
+                def _emit_timeline_event(
+                    state_obj: dict[str, Any],
+                    *,
+                    stage: str,
+                    message: str,
+                    status: str = "info",
+                    details: dict[str, Any] | None = None,
+                ) -> str | None:
+                    event = _timeline(
+                        state_obj,
+                        stage=stage,
+                        message=message,
+                        status=status,
+                        details=details,
+                    )
+                    if EMIT_TIMELINE_EVENTS:
+                        return _sc_event(rid, ct, req.model, event)
+                    return None
 
                 # Classify (also initializes search fields and original_messages)
                 if EMIT_STATUS_UPDATES:
@@ -610,6 +854,18 @@ async def chat_completions(req: ChatCompletionRequest):
 
                 if classified is None:
                     raise RuntimeError("Classification stage completed without a result")
+                classification_evt = _emit_timeline_event(
+                    classified,
+                    stage="classify",
+                    message="Request classified",
+                    details={
+                        "task_type": classified.get("task_type"),
+                        "confidence": classified.get("confidence"),
+                        "use_fast_path": bool(classified.get("use_fast_path")),
+                    },
+                )
+                if classification_evt:
+                    yield classification_evt
 
                 logger.info(
                     "Streaming route decided rid=%s path=%s task_type=%s conf=%.2f fast_model=%s",
@@ -693,6 +949,20 @@ async def chat_completions(req: ChatCompletionRequest):
                                     yield _sc(rid, ct, req.model, "🌐 Web search used\n")
                         if EMIT_ROUTING_BANNER:
                             yield _sc(rid, ct, req.model, banner(fast_result))
+                        fast_complete_evt = _emit_timeline_event(
+                            fast_result,
+                            stage="complete",
+                            message="Completed on fast path",
+                            status="success",
+                            details={
+                                "selected_model": fast_result.get(
+                                    "selected_model",
+                                    fast_result.get("fast_model", ""),
+                                )
+                            },
+                        )
+                        if fast_complete_evt:
+                            yield fast_complete_evt
 
                         content = fast_result["result_text"]
                         if content:
@@ -703,6 +973,18 @@ async def chat_completions(req: ChatCompletionRequest):
                                     req.model,
                                     content[i : i + _STREAM_RESULT_CHUNK_CHARS],
                                 )
+                        if EMIT_TRUST_SIGNALS:
+                            yield _sc_event(
+                                rid,
+                                ct,
+                                req.model,
+                                {
+                                    "stage": "trust",
+                                    "status": "info",
+                                    "message": "Trust signals",
+                                    "details": build_trust_signals(fast_result),
+                                },
+                            )
 
                         yield _sc_stop(rid, ct, req.model)
                         yield _SSE_DONE
@@ -714,6 +996,14 @@ async def chat_completions(req: ChatCompletionRequest):
                             success=False,
                             reason=fast_result.get("route_reason", "fast_only:fallback"),
                         )
+                        fallback_evt = _emit_timeline_event(
+                            fast_result,
+                            stage="complete",
+                            message="Fast-only request returned fallback message",
+                            status="warning",
+                        )
+                        if fallback_evt:
+                            yield fallback_evt
                         yield _sc(rid, ct, req.model, f"{_FAST_ONLY_FALLBACK_TEXT}\n")
                         yield _sc_stop(rid, ct, req.model)
                         yield _SSE_DONE
@@ -721,18 +1011,43 @@ async def chat_completions(req: ChatCompletionRequest):
 
                     # Fast path was skipped/failed/escalated in audrey_deep, so continue to deep panel.
                     classified = fast_result
+                    if classified.get("escalated"):
+                        esc_evt = _emit_timeline_event(
+                            classified,
+                            stage="escalation",
+                            message="Escalated from fast path to deep panel",
+                            status="warning",
+                            details={"reason": classified.get("route_reason", "")},
+                        )
+                        if esc_evt:
+                            yield esc_evt
                 elif req.model == "audrey_fast":
                     state.update_audrey_fast_health(
                         selected_model=classified.get("fast_model", "none"),
                         success=False,
                         reason=classified.get("route_reason", "fast_only:fallback"),
                     )
+                    fallback_evt = _emit_timeline_event(
+                        classified,
+                        stage="complete",
+                        message="Fast-only request returned fallback message",
+                        status="warning",
+                    )
+                    if fallback_evt:
+                        yield fallback_evt
                     yield _sc(rid, ct, req.model, f"{_FAST_ONLY_FALLBACK_TEXT}\n")
                     yield _sc_stop(rid, ct, req.model)
                     yield _SSE_DONE
                     return
 
                 # Deep panel (audrey_deep)
+                deep_evt = _emit_timeline_event(
+                    classified,
+                    stage="deep_path",
+                    message="Running deep-panel pipeline",
+                )
+                if deep_evt:
+                    yield deep_evt
                 if EMIT_STATUS_UPDATES:
                     yield _sc(rid, ct, req.model, "📋 Planning approach...\n")
 
@@ -753,8 +1068,19 @@ async def chat_completions(req: ChatCompletionRequest):
 
                 if planned is None:
                     raise RuntimeError("Planning stage completed without a result")
+                plan_evt = _emit_timeline_event(
+                    planned,
+                    stage="plan",
+                    message="Deep-panel plan ready",
+                    details={
+                        "workers": len(planned.get("deep_workers", [])),
+                        "planned_sub_tasks": len(planned.get("sub_tasks") or []),
+                    },
+                )
+                if plan_evt:
+                    yield plan_evt
 
-                if planned.get("sub_tasks"):
+                if EMIT_STATUS_UPDATES and planned.get("sub_tasks"):
                     yield _sc(
                         rid,
                         ct,
@@ -788,6 +1114,14 @@ async def chat_completions(req: ChatCompletionRequest):
                     raise RuntimeError(
                         "Parallel generation stage completed without a result"
                     )
+                generate_evt = _emit_timeline_event(
+                    generated,
+                    stage="generate",
+                    message="Worker drafts generated",
+                    details={"outputs": len(generated.get("worker_outputs", []))},
+                )
+                if generate_evt:
+                    yield generate_evt
 
                 if EMIT_STATUS_UPDATES:
                     yield _sc(rid, ct, req.model, "🧩 Preparing synthesis...\n")
@@ -810,6 +1144,25 @@ async def chat_completions(req: ChatCompletionRequest):
                 if prepared is None:
                     raise RuntimeError(
                         "Synthesis preparation stage completed without a result"
+                    )
+                prep_evt = _emit_timeline_event(
+                    prepared,
+                    stage="prepare_synthesis",
+                    message="Synthesis context prepared",
+                )
+                if prep_evt:
+                    yield prep_evt
+                if EMIT_TRUST_SIGNALS:
+                    yield _sc_event(
+                        rid,
+                        ct,
+                        req.model,
+                        {
+                            "stage": "trust",
+                            "status": "info",
+                            "message": "Trust signals",
+                            "details": build_trust_signals(prepared),
+                        },
                     )
 
                 async for chunk in stream_synthesis(prepared, rid=rid, created=ct):
@@ -840,6 +1193,13 @@ async def chat_completions(req: ChatCompletionRequest):
     content = final["result_text"]
     if EMIT_ROUTING_BANNER:
         content = banner(final) + content
+    audrey_meta: dict[str, Any] = {
+        "mode": final.get("audrey_mode", normalize_audrey_mode(req.audrey_mode)),
+        "timeline": final.get("timeline", []),
+        "needs_fresh_data": bool(final.get("needs_fresh_data", False)),
+    }
+    if EMIT_TRUST_SIGNALS:
+        audrey_meta["trust"] = build_trust_signals(final)
     return JSONResponse(
         {
             "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
@@ -861,5 +1221,6 @@ async def chat_completions(req: ChatCompletionRequest):
                     + final.get("completion_tokens", 0)
                 ),
             },
+            "audrey": audrey_meta,
         }
     )
