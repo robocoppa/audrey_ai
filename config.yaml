@@ -1,6 +1,10 @@
 # ─── Model Registry ───
 # Used by the fast-path for high-confidence single-model routing.
 # Priority determines selection order; speed/quality are informational.
+#
+# Removed: llama4:latest (67GB, can't coexist), gemma4:31b (redundant),
+#          qwen2.5-coder:32b (covered by qwen3-coder-next + devstral),
+#          qwen3-vl:32b (llava:34b + kimi-k2.5:cloud cover VL)
 model_registry:
   code:
     - name: "qwen3.5:397b-cloud"
@@ -19,10 +23,6 @@ model_registry:
       priority: 10
       speed: 8
       quality: 8
-    - name: "qwen2.5-coder:32b"
-      priority: 8
-      speed: 5
-      quality: 9
     - name: "devstral-small-2:latest"
       priority: 7
       speed: 9
@@ -57,10 +57,6 @@ model_registry:
       priority: 9
       speed: 4
       quality: 10
-    - name: "llama4:latest"
-      priority: 8
-      speed: 3
-      quality: 9
     - name: "nemotron-cascade-2:latest"
       priority: 7
       speed: 5
@@ -75,10 +71,6 @@ model_registry:
       priority: 12
       speed: 8
       quality: 10
-    - name: "qwen3-vl:32b"
-      priority: 10
-      speed: 6
-      quality: 9
     - name: "llava:34b"
       priority: 7
       speed: 4
@@ -101,20 +93,12 @@ model_registry:
       priority: 10
       speed: 8
       quality: 9
-    - name: "llama4:latest"
-      priority: 9
-      speed: 3
-      quality: 9
     - name: "qwen3.5:35b-a3b"
       priority: 8
       speed: 6
       quality: 9
     - name: "glm-4.7-flash:q8_0"
       priority: 7
-      speed: 7
-      quality: 8
-    - name: "gemma4:31b"
-      priority: 6
       speed: 7
       quality: 8
     - name: "nemotron-cascade-2:latest"
@@ -134,10 +118,13 @@ model_registry:
 # This list is used by BOTH fast path AND deep panel workers.
 # Models NOT listed here will be called without tools (run_model_once)
 # to avoid Ollama 400 "does not support tools" errors.
-# Do NOT add: deepseek-r1:32b, llava:34b, deepseek-coder-v2:16b
+#
+# Trimmed: removed local models that are slow/unreliable at tool loops.
+# Kept qwen3.5:35b-a3b (MoE, fast, primary synthesizer — needs tools
+# as safety net if all cloud models go down).
 fast_path:
   enabled: true
-  confidence_threshold: 0.88   # only fast-path when router is very sure
+  confidence_threshold: 0.78
   tool_capable_models:
     # Cloud models
     - "qwen3.5:397b-cloud"
@@ -146,15 +133,9 @@ fast_path:
     - "glm-5.1:cloud"
     - "cogito-2.1:671b-cloud"
     - "nemotron-3-super:cloud"
-    # Local models
+    # Local models (only the most reliable at tool calling)
     - "qwen3.5:35b-a3b"
-    - "gemma4:31b"
-    - "qwen3-coder-next:latest"
-    - "qwen2.5-coder:32b"
-    - "llama4:latest"
-    - "glm-4.7-flash:q8_0"
     - "devstral-small-2:latest"
-    - "qwen3-vl:32b"
 
 # ─── Deep Panel (auto — mixed cloud + local workers) ───
 deep_panel:
@@ -177,7 +158,7 @@ deep_panel:
   vl:
     workers:
       - "kimi-k2.5:cloud"
-      - "qwen3-vl:32b"
+      - "llava:34b"
     synthesizer: "qwen3.5:35b-a3b"
     fallback_synthesizer: "glm-5.1:cloud"
 
@@ -186,12 +167,10 @@ deep_panel:
       - "qwen3.5:397b-cloud"
       - "deepseek-v3.2:cloud"
       - "qwen3.5:35b-a3b"
-    synthesizer: "gemma4:31b"
+    synthesizer: "glm-4.7-flash:q8_0"
     fallback_synthesizer: "glm-5.1:cloud"
 
 # ─── Deep Panel Cloud (all cloud: workers + synthesizer) ───
-# FIX 1: These panels now benefit from MAX_DEEP_WORKERS_CLOUD=3
-# so all 3 workers are used instead of being capped at 2.
 deep_panel_cloud:
   code:
     workers:
@@ -229,44 +208,43 @@ deep_panel_local:
   code:
     workers:
       - "qwen3-coder-next:latest"
-      - "qwen2.5-coder:32b"
+      - "devstral-small-2:latest"
       - "deepseek-coder-v2:16b"
-    synthesizer: "qwen3.5:35b-a3b"
-    fallback_synthesizer: "gemma4:31b"
-
-  reasoning:
-    workers:
-      - "llama4:latest"
-      - "deepseek-r1:32b"
-      - "nemotron-cascade-2:latest"
     synthesizer: "qwen3.5:35b-a3b"
     fallback_synthesizer: "glm-4.7-flash:q8_0"
 
+  reasoning:
+    workers:
+      - "deepseek-r1:32b"
+      - "nemotron-cascade-2:latest"
+      - "qwen3.5:35b-a3b"
+    synthesizer: "glm-4.7-flash:q8_0"
+    fallback_synthesizer: "olmo-3.1:32b"
+
   vl:
     workers:
-      - "qwen3-vl:32b"
       - "llava:34b"
     synthesizer: "qwen3.5:35b-a3b"
-    fallback_synthesizer: "gemma4:31b"
+    fallback_synthesizer: "glm-4.7-flash:q8_0"
 
   general:
     workers:
-      - "llama4:latest"
       - "qwen3.5:35b-a3b"
       - "nemotron-cascade-2:latest"
+      - "olmo-3.1:32b"
     synthesizer: "glm-4.7-flash:q8_0"
-    fallback_synthesizer: "olmo-3.1:32b"
+    fallback_synthesizer: "qwen3.5:35b-a3b"
 
 # ─── Agentic Features ───
 agentic:
   react:
-    max_rounds: 3
+    max_rounds: 2
     compress_after_rounds: 2
     compress_max_result_chars: 2000
 
   planning:
-    enabled: true
-    min_tokens: 40
+    enabled: false
+    min_tokens: 80
 
   reflection:
     enabled: true
@@ -274,8 +252,8 @@ agentic:
 
   escalation:
     enabled: true
-    min_response_length: 100
-    confidence_ceiling: 0.95
+    min_response_length: 120
+    confidence_ceiling: 0.90
 
 # ─── Timeouts (seconds) ───
 timeouts:

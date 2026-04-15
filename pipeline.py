@@ -36,12 +36,6 @@ from helpers import (
 )
 from models import AudreyState
 from ollama import run_model_once, run_model_with_tools
-from search import (
-    extract_search_query,
-    format_search_results,
-    needs_web_search,
-    web_search,
-)
 from helpers import get_last_user_text
 
 logger = logging.getLogger("audrey.pipeline")
@@ -54,6 +48,7 @@ logger = logging.getLogger("audrey.pipeline")
 async def node_classify(s):
     """Classify, inject datetime, decide fast vs deep (with complexity gate)."""
     s["messages"] = inject_datetime(s["messages"])
+    s["original_messages"] = [m.copy() for m in s["messages"]]
     s.update(await classify_request(s["messages"]))
 
     # Agentic defaults
@@ -63,6 +58,11 @@ async def node_classify(s):
     s.setdefault("reflection_retries", 0)
     s.setdefault("escalated", False)
     s.setdefault("is_code_review", False)
+
+    # Search is now tool-only; initialize fields for compatibility
+    s.setdefault("search_performed", False)
+    s.setdefault("search_query", "")
+    s.setdefault("search_results", [])
 
     # Default: no fast path
     s["use_fast_path"] = False
@@ -91,47 +91,6 @@ async def node_classify(s):
                     s["fast_model"] = fm
                     s["route_reason"] += f" → fast:{fm}"
 
-    return s
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Node: web search
-# ══════════════════════════════════════════════════════════════════════════════
-
-async def web_search_node(s):
-    s["search_performed"] = False
-    s["search_query"] = ""
-    s["search_results"] = []
-    s["original_messages"] = [m.copy() for m in s["messages"]]
-
-    # Only check user messages for search triggers.
-    # Previously this used flatten_messages() which included all messages,
-    # causing the injected datetime system message (containing "today",
-    # "yesterday", "this week", etc.) to false-trigger search on every request.
-    last = get_last_user_text(s["messages"])
-    if not last or not needs_web_search(last):
-        return s
-
-    q = extract_search_query(last)
-    results = await web_search(q)
-    if not results:
-        return s
-
-    s["search_performed"] = True
-    s["search_query"] = q
-    s["search_results"] = results
-
-    ctx = format_search_results(results)
-    new = []
-    inserted = False
-    for m in s["messages"]:
-        if not inserted and m.get("role") != "system":
-            new.append({"role": "system", "content": ctx})
-            inserted = True
-        new.append(m)
-    if not inserted:
-        new.append({"role": "system", "content": ctx})
-    s["messages"] = new
     return s
 
 
@@ -465,19 +424,21 @@ async def node_reflect_deep(s):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_deep_graph(include_synthesis: bool = True):
-    """Build the deep-panel pipeline graph with planning + reflection."""
+    """Build the deep-panel pipeline graph with reflection.
+
+    Search is handled by tool-calling during worker generation, not as
+    a separate pipeline node.
+    """
     g = StateGraph(AudreyState)
     for n, f in [
         ("classify", node_classify),
-        ("web_search", web_search_node),
         ("plan", node_plan_panel),
         ("parallel", node_parallel_generate),
         ("prep", node_prepare_synthesis),
     ]:
         g.add_node(n, f)
     g.set_entry_point("classify")
-    g.add_edge("classify", "web_search")
-    g.add_edge("web_search", "plan")
+    g.add_edge("classify", "plan")
     g.add_edge("plan", "parallel")
     g.add_edge("parallel", "prep")
     if include_synthesis:
@@ -501,23 +462,20 @@ def _should_run_react(s) -> str:
 def build_fast_graph():
     """Build the fast path with ReAct agent + adaptive escalation.
 
-    Uses a conditional edge after web_search so that react_agent is
+    Uses a conditional edge after classify so that react_agent is
     only invoked when classify actually selected a fast model.
-    Previously, react_agent always ran and would crash with
-    'model is required' when fast_model was blank.
+    Search is handled by tool-calling inside the ReAct agent.
     """
     g = StateGraph(AudreyState)
     for n, f in [
         ("classify", node_classify),
-        ("web_search", web_search_node),
         ("react_agent", node_react_agent),
         ("escalate", node_adaptive_escalate),
     ]:
         g.add_node(n, f)
     g.set_entry_point("classify")
-    g.add_edge("classify", "web_search")
     g.add_conditional_edges(
-        "web_search",
+        "classify",
         _should_run_react,
         {"react_agent": "react_agent", "escalate": "escalate"},
     )
