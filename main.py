@@ -54,7 +54,7 @@ from pipeline import (
     node_plan_panel,
     node_prepare_synthesis,
 )
-from streaming import _sc, banner, stream_synthesis
+from streaming import _SSE_DONE, _sc, _sc_stop, banner, stream_synthesis
 from tool_registry import ToolRegistry
 
 logging.basicConfig(
@@ -68,6 +68,12 @@ _FAST_ONLY_FALLBACK_TEXT = (
     "Try again, or use audrey_deep for full deep-panel fallback."
 )
 _STREAM_RESULT_CHUNK_CHARS = 1200
+
+
+def _log_safe_query(query: str | None) -> str:
+    """Return a log-safe version of a search query (masks content, keeps length)."""
+    q = str(query or "").strip()
+    return f"[redacted:{len(q)} chars]" if q else ""
 
 
 async def _await_stream_stage(
@@ -339,10 +345,17 @@ async def rediscover_tools():
 async def run_graph_dispatch(req, *, stream_prepare_only=False):
     msgs_raw = [m.model_dump() for m in req.messages]
     temp = req.temperature if req.temperature is not None else DEFAULT_TEMPERATURE
+    cache_kwargs = dict(
+        max_tokens=req.max_tokens,
+        top_p=req.top_p,
+        stop=req.stop,
+        frequency_penalty=req.frequency_penalty,
+        presence_penalty=req.presence_penalty,
+    )
 
     # Cache check
     if CACHE_ENABLED and not req.stream:
-        cached = cache.get(msgs_raw, req.model, temp)
+        cached = cache.get(msgs_raw, req.model, temp, **cache_kwargs)
         if cached is not None:
             logger.info("Cache hit for model=%s", req.model)
             return {
@@ -385,7 +398,7 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
         if r.get("use_fast_path") and r.get("result_text") and not r.get("escalated"):
             r["latency_ms"] = int((time.time() - s["started_at"]) * 1000)
             if CACHE_ENABLED:
-                cache.put(msgs_raw, req.model, temp, r["result_text"])
+                cache.put(msgs_raw, req.model, temp, r["result_text"], **cache_kwargs)
             if req.model == "audrey_fast":
                 state.update_audrey_fast_health(
                     selected_model=r.get("selected_model", r.get("fast_model", "none")),
@@ -410,7 +423,9 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
                             "quality", "n/a"
                         ),
                         "search": r.get("search_performed", False),
-                        "search_query": r.get("search_query", ""),
+                        "search_query": _log_safe_query(
+                            r.get("search_query", "")
+                        ),
                         "tools": [
                             t.get("tool", "") for t in r.get("tools_used", [])
                         ],
@@ -452,11 +467,10 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
             return r
 
         # Fast path was skipped, failed, or escalated — fall through to deep panel
-        s = r
-        s["started_at"] = time.time()
-        if r.get("escalated"):
+        s = {**r, "started_at": time.time()}
+        if s.get("escalated"):
             logger.info(
-                "Escalated from fast→deep: %s", r.get("route_reason", "")
+                "Escalated from fast→deep: %s", s.get("route_reason", "")
             )
 
     # audrey_fast is fast-only and must never run the deep panel.
@@ -494,7 +508,7 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
     r["latency_ms"] = int((time.time() - s["started_at"]) * 1000)
 
     if CACHE_ENABLED and not stream_prepare_only and r.get("result_text"):
-        cache.put(msgs_raw, req.model, temp, r["result_text"])
+        cache.put(msgs_raw, req.model, temp, r["result_text"], **cache_kwargs)
 
     logger.info(
         json.dumps(
@@ -508,7 +522,7 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
                 "planned": bool(r.get("sub_tasks")),
                 "reflection": r.get("reflection_result", {}).get("quality", "n/a"),
                 "search": r.get("search_performed", False),
-                "search_query": r.get("search_query", ""),
+                "search_query": _log_safe_query(r.get("search_query", "")),
                 "tools": [t.get("tool", "") for t in r.get("tools_used", [])],
                 "escalated": r.get("escalated", False),
                 "ms": r["latency_ms"],
@@ -528,7 +542,17 @@ async def chat_completions(req: ChatCompletionRequest):
         raise HTTPException(400, "messages empty")
     if not any(m.role == "user" for m in req.messages):
         raise HTTPException(400, "No user message")
-    if req.max_tokens and req.max_tokens > 128000:
+    if req.temperature is not None and not (0 <= req.temperature <= 2):
+        raise HTTPException(400, "temperature must be between 0 and 2")
+    if req.top_p is not None and not (0 <= req.top_p <= 1):
+        raise HTTPException(400, "top_p must be between 0 and 1")
+    if req.frequency_penalty is not None and not (-2 <= req.frequency_penalty <= 2):
+        raise HTTPException(400, "frequency_penalty must be between -2 and 2")
+    if req.presence_penalty is not None and not (-2 <= req.presence_penalty <= 2):
+        raise HTTPException(400, "presence_penalty must be between -2 and 2")
+    if req.max_tokens is not None and req.max_tokens <= 0:
+        raise HTTPException(400, "max_tokens must be positive")
+    if req.max_tokens is not None and req.max_tokens > 128000:
         raise HTTPException(400, "max_tokens too large")
 
     # ── Streaming ────────────────────────────────────────────────────────
@@ -544,173 +568,171 @@ async def chat_completions(req: ChatCompletionRequest):
                 req.model,
                 len(req.messages),
             )
-
-            if EMIT_STATUS_UPDATES:
-                yield _sc(rid, ct, req.model, "🔍 Analyzing...\n")
-
-            init_state = build_initial_state(
-                request_id=request_id,
-                requested_model=req.model,
-                messages=[m.model_dump() for m in req.messages],
-                stream=True,
-                temperature=(
-                    req.temperature
-                    if req.temperature is not None
-                    else DEFAULT_TEMPERATURE
-                ),
-                max_tokens=req.max_tokens,
-                top_p=req.top_p,
-                stop=req.stop,
-                frequency_penalty=req.frequency_penalty,
-                presence_penalty=req.presence_penalty,
-            )
-
-            # Classify (also initializes search fields and original_messages)
-            if EMIT_STATUS_UPDATES:
-                yield _sc(rid, ct, req.model, "🧭 Routing request...\n")
-
-            classified = None
-            async for chunk, result in _await_stream_stage(
-                node_classify(init_state),
-                rid=rid,
-                created=ct,
-                model_name=req.model,
-                request_id=request_id,
-                stage="classify",
-                heartbeat_text="Still analyzing request",
-            ):
-                if chunk is not None:
-                    yield chunk
-                else:
-                    classified = result
-
-            if classified is None:
-                raise RuntimeError("Classification stage completed without a result")
-
-            logger.info(
-                "Streaming route decided rid=%s path=%s task_type=%s conf=%.2f fast_model=%s",
-                request_id,
-                (
-                    "fast+react"
-                    if classified.get("use_fast_path") and classified.get("fast_model")
-                    else "fast-only-fallback"
-                    if req.model == "audrey_fast"
-                    else "deep"
-                ),
-                classified.get("task_type"),
-                classified.get("confidence", 0.0),
-                classified.get("fast_model", ""),
-            )
-
-            # Decide path — search is handled by tool-calling during generation
-            if classified.get("use_fast_path") and classified.get("fast_model"):
+            try:
                 if EMIT_STATUS_UPDATES:
-                    yield _sc(
-                        rid,
-                        ct,
-                        req.model,
-                        "⚡ Running fast path with tools/search...\n",
-                    )
+                    yield _sc(rid, ct, req.model, "🔍 Analyzing...\n")
 
-                fast_result = None
+                init_state = build_initial_state(
+                    request_id=request_id,
+                    requested_model=req.model,
+                    messages=[m.model_dump() for m in req.messages],
+                    stream=True,
+                    temperature=(
+                        req.temperature
+                        if req.temperature is not None
+                        else DEFAULT_TEMPERATURE
+                    ),
+                    max_tokens=req.max_tokens,
+                    top_p=req.top_p,
+                    stop=req.stop,
+                    frequency_penalty=req.frequency_penalty,
+                    presence_penalty=req.presence_penalty,
+                )
+
+                # Classify (also initializes search fields and original_messages)
+                if EMIT_STATUS_UPDATES:
+                    yield _sc(rid, ct, req.model, "🧭 Routing request...\n")
+
+                classified = None
                 async for chunk, result in _await_stream_stage(
-                    FAST_GRAPH.ainvoke(classified),
+                    node_classify(init_state),
                     rid=rid,
                     created=ct,
                     model_name=req.model,
                     request_id=request_id,
-                    stage="fast_graph",
-                    heartbeat_text="Still running fast path (tools/search)",
+                    stage="classify",
+                    heartbeat_text="Still analyzing request",
                 ):
                     if chunk is not None:
                         yield chunk
                     else:
-                        fast_result = result
+                        classified = result
 
-                if fast_result is None:
-                    raise RuntimeError("Fast graph completed without a result")
+                if classified is None:
+                    raise RuntimeError("Classification stage completed without a result")
 
-                if (
-                    fast_result.get("use_fast_path")
-                    and fast_result.get("result_text")
-                    and not fast_result.get("escalated")
-                ):
-                    if req.model == "audrey_fast":
-                        state.update_audrey_fast_health(
-                            selected_model=fast_result.get(
-                                "selected_model",
-                                fast_result.get("fast_model", "none"),
-                            ),
-                            success=True,
-                            reason=fast_result.get("route_reason", "fast_only:completed"),
-                        )
+                logger.info(
+                    "Streaming route decided rid=%s path=%s task_type=%s conf=%.2f fast_model=%s",
+                    request_id,
+                    (
+                        "fast+react"
+                        if classified.get("use_fast_path")
+                        and classified.get("fast_model")
+                        else "fast-only-fallback"
+                        if req.model == "audrey_fast"
+                        else "deep"
+                    ),
+                    classified.get("task_type"),
+                    classified.get("confidence", 0.0),
+                    classified.get("fast_model", ""),
+                )
+
+                # Decide path — search is handled by tool-calling during generation
+                if classified.get("use_fast_path") and classified.get("fast_model"):
                     if EMIT_STATUS_UPDATES:
                         yield _sc(
                             rid,
                             ct,
                             req.model,
-                            f"⚡ Fast path complete: {fast_result.get('selected_model', fast_result.get('fast_model', '?'))}\n\n",
+                            "⚡ Running fast path with tools/search...\n",
                         )
-                        if fast_result.get("search_performed"):
-                            search_query = str(fast_result.get("search_query", "")).strip()
-                            if search_query:
-                                yield _sc(
-                                    rid,
-                                    ct,
-                                    req.model,
-                                    f"🌐 Web search used: {search_query}\n",
-                                )
-                            else:
-                                yield _sc(rid, ct, req.model, "🌐 Web search used\n")
-                    if EMIT_ROUTING_BANNER:
-                        yield _sc(rid, ct, req.model, banner(fast_result))
 
-                    content = fast_result["result_text"]
-                    if content:
-                        for i in range(0, len(content), _STREAM_RESULT_CHUNK_CHARS):
+                    fast_result = None
+                    async for chunk, result in _await_stream_stage(
+                        FAST_GRAPH.ainvoke(classified),
+                        rid=rid,
+                        created=ct,
+                        model_name=req.model,
+                        request_id=request_id,
+                        stage="fast_graph",
+                        heartbeat_text="Still running fast path (tools/search)",
+                    ):
+                        if chunk is not None:
+                            yield chunk
+                        else:
+                            fast_result = result
+
+                    if fast_result is None:
+                        raise RuntimeError("Fast graph completed without a result")
+
+                    if (
+                        fast_result.get("use_fast_path")
+                        and fast_result.get("result_text")
+                        and not fast_result.get("escalated")
+                    ):
+                        if req.model == "audrey_fast":
+                            state.update_audrey_fast_health(
+                                selected_model=fast_result.get(
+                                    "selected_model",
+                                    fast_result.get("fast_model", "none"),
+                                ),
+                                success=True,
+                                reason=fast_result.get(
+                                    "route_reason", "fast_only:completed"
+                                ),
+                            )
+                        if EMIT_STATUS_UPDATES:
                             yield _sc(
                                 rid,
                                 ct,
                                 req.model,
-                                content[i : i + _STREAM_RESULT_CHUNK_CHARS],
+                                f"⚡ Fast path complete: {fast_result.get('selected_model', fast_result.get('fast_model', '?'))}\n\n",
                             )
+                            if fast_result.get("search_performed"):
+                                search_query = str(
+                                    fast_result.get("search_query", "")
+                                ).strip()
+                                if search_query:
+                                    yield _sc(
+                                        rid,
+                                        ct,
+                                        req.model,
+                                        f"🌐 Web search used: {search_query}\n",
+                                    )
+                                else:
+                                    yield _sc(rid, ct, req.model, "🌐 Web search used\n")
+                        if EMIT_ROUTING_BANNER:
+                            yield _sc(rid, ct, req.model, banner(fast_result))
 
-                    yield (
-                        f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': req.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-                    )
-                    yield "data: [DONE]\n\n"
-                    return
+                        content = fast_result["result_text"]
+                        if content:
+                            for i in range(0, len(content), _STREAM_RESULT_CHUNK_CHARS):
+                                yield _sc(
+                                    rid,
+                                    ct,
+                                    req.model,
+                                    content[i : i + _STREAM_RESULT_CHUNK_CHARS],
+                                )
 
-                if req.model == "audrey_fast":
-                    state.update_audrey_fast_health(
-                        selected_model=fast_result.get("selected_model", "none"),
-                        success=False,
-                        reason=fast_result.get("route_reason", "fast_only:fallback"),
-                    )
-                    yield _sc(rid, ct, req.model, f"{_FAST_ONLY_FALLBACK_TEXT}\n")
-                    yield (
-                        f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': req.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-                    )
-                    yield "data: [DONE]\n\n"
-                    return
+                        yield _sc_stop(rid, ct, req.model)
+                        yield _SSE_DONE
+                        return
 
-                # Fast path was skipped/failed/escalated in audrey_deep, so continue to deep panel.
-                classified = fast_result
-            else:
-                if req.model == "audrey_fast":
+                    if req.model == "audrey_fast":
+                        state.update_audrey_fast_health(
+                            selected_model=fast_result.get("selected_model", "none"),
+                            success=False,
+                            reason=fast_result.get("route_reason", "fast_only:fallback"),
+                        )
+                        yield _sc(rid, ct, req.model, f"{_FAST_ONLY_FALLBACK_TEXT}\n")
+                        yield _sc_stop(rid, ct, req.model)
+                        yield _SSE_DONE
+                        return
+
+                    # Fast path was skipped/failed/escalated in audrey_deep, so continue to deep panel.
+                    classified = fast_result
+                elif req.model == "audrey_fast":
                     state.update_audrey_fast_health(
                         selected_model=classified.get("fast_model", "none"),
                         success=False,
                         reason=classified.get("route_reason", "fast_only:fallback"),
                     )
                     yield _sc(rid, ct, req.model, f"{_FAST_ONLY_FALLBACK_TEXT}\n")
-                    yield (
-                        f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': req.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-                    )
-                    yield "data: [DONE]\n\n"
+                    yield _sc_stop(rid, ct, req.model)
+                    yield _SSE_DONE
                     return
 
-                # Deep panel
+                # Deep panel (audrey_deep)
                 if EMIT_STATUS_UPDATES:
                     yield _sc(rid, ct, req.model, "📋 Planning approach...\n")
 
@@ -790,8 +812,19 @@ async def chat_completions(req: ChatCompletionRequest):
                         "Synthesis preparation stage completed without a result"
                     )
 
-                async for chunk in stream_synthesis(prepared):
+                async for chunk in stream_synthesis(prepared, rid=rid, created=ct):
                     yield chunk
+            except Exception as e:
+                logger.exception(
+                    "Streaming request failed rid=%s model=%s: %s",
+                    request_id,
+                    req.model,
+                    e,
+                )
+                error_text = str(e).strip() or "internal error"
+                yield _sc(rid, ct, req.model, f"[Error: {error_text[:240]}]\n")
+                yield _sc_stop(rid, ct, req.model)
+                yield _SSE_DONE
 
         return StreamingResponse(
             _stream(),

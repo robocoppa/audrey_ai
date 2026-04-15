@@ -7,9 +7,9 @@ and deep-panel streaming.
 
 import json
 import logging
-import uuid
 import time
-from typing import Any, AsyncGenerator, Dict
+import uuid
+from typing import Any, AsyncGenerator
 
 import state
 from config import EMIT_ROUTING_BANNER, EMIT_STATUS_UPDATES
@@ -23,15 +23,35 @@ logger = logging.getLogger("audrey.streaming")
 
 # ── SSE chunk helper ─────────────────────────────────────────────────────────
 
+_SSE_DONE = "data: [DONE]\n\n"
+
+
 def _sc(rid: str, created: int, model_name: str, text: str) -> str:
     return (
         f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': created, 'model': model_name, 'choices': [{'index': 0, 'delta': {'content': text}, 'finish_reason': None}]})}\n\n"
     )
 
 
+def _sc_stop(rid: str, created: int, model_name: str) -> str:
+    return (
+        f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': created, 'model': model_name, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+    )
+
+
+def _resolve_sid_ct(
+    state: dict[str, Any],
+    rid: str | None,
+    created: int | None,
+) -> tuple[str, int]:
+    ct = created if created is not None else int(time.time())
+    sid_source = str(state.get("request_id") or uuid.uuid4())
+    sid = rid or f"chatcmpl-{sid_source.replace('-', '')[:24]}"
+    return sid, ct
+
+
 # ── Banner builder ───────────────────────────────────────────────────────────
 
-def banner(s: Dict[str, Any]) -> str:
+def banner(s: dict[str, Any]) -> str:
     """Build a compact, readable routing banner for the chat UI."""
     sel = s.get("selected_model") or s.get("synthesizer") or "?"
     path = "fast+react" if s.get("use_fast_path") else "deep"
@@ -51,7 +71,7 @@ def banner(s: Dict[str, Any]) -> str:
 
     tools_log = s.get("tools_used", [])
     if tools_log:
-        seen: Dict[str, int] = {}
+        seen: dict[str, int] = {}
         for t in tools_log:
             raw_name = t.get("tool", "")
             short = raw_name.split("__", 1)[-1] if "__" in raw_name else raw_name
@@ -82,13 +102,16 @@ def banner(s: Dict[str, Any]) -> str:
 
 # ── Fast-path streamer ──────────────────────────────────────────────────────
 
-async def stream_fast_path(s: Dict[str, Any]) -> AsyncGenerator[str, None]:
-    ct = int(time.time())
-    rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+async def stream_fast_path(
+    s: dict[str, Any],
+    *,
+    rid: str | None = None,
+    created: int | None = None,
+) -> AsyncGenerator[str, None]:
+    sid, ct = _resolve_sid_ct(s, rid, created)
     mn = s["requested_model"]
     model = s.get("fast_model", "")
 
-    # Guard: if fast_model is blank, yield error and bail
     if not model:
         logger.warning("stream_fast_path called with empty fast_model — skipping")
         if mn == "audrey_fast":
@@ -97,17 +120,15 @@ async def stream_fast_path(s: Dict[str, Any]) -> AsyncGenerator[str, None]:
                 success=False,
                 reason="fast_only:no_model_selected",
             )
-        yield _sc(rid, ct, mn, "[Fast path error: no model selected. Falling back.]\n")
-        yield (
-            f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': mn, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-        )
-        yield "data: [DONE]\n\n"
+        yield _sc(sid, ct, mn, "[Fast path error: no model selected. Falling back.]\n")
+        yield _sc_stop(sid, ct, mn)
+        yield _SSE_DONE
         return
 
     if EMIT_STATUS_UPDATES:
-        yield _sc(rid, ct, mn, f"⚡ Fast path (ReAct): {model}\n\n")
+        yield _sc(sid, ct, mn, f"⚡ Fast path (ReAct): {model}\n\n")
     if EMIT_ROUTING_BANNER:
-        yield _sc(rid, ct, mn, banner(s))
+        yield _sc(sid, ct, mn, banner(s))
 
     sys_msg = {
         "role": "system",
@@ -121,12 +142,9 @@ async def stream_fast_path(s: Dict[str, Any]) -> AsyncGenerator[str, None]:
             msgs,
             **model_call_kwargs(s),
         ):
-            msg = item.get("message") or {}
-            c = msg.get("content", "")
+            c = (item.get("message") or {}).get("content", "")
             if c:
-                yield (
-                    f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': mn, 'choices': [{'index': 0, 'delta': {'content': c}, 'finish_reason': None}]})}\n\n"
-                )
+                yield _sc(sid, ct, mn, c)
             if item.get("done"):
                 note_model_success(model)
                 if mn == "audrey_fast":
@@ -135,10 +153,8 @@ async def stream_fast_path(s: Dict[str, Any]) -> AsyncGenerator[str, None]:
                         success=True,
                         reason=s.get("route_reason", "fast_only:completed"),
                     )
-                yield (
-                    f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': mn, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-                )
-                yield "data: [DONE]\n\n"
+                yield _sc_stop(sid, ct, mn)
+                yield _SSE_DONE
                 return
     except Exception as e:
         note_model_failure(model)
@@ -149,18 +165,20 @@ async def stream_fast_path(s: Dict[str, Any]) -> AsyncGenerator[str, None]:
                 success=False,
                 reason=f"fast_only:stream_error:{str(e)[:120]}",
             )
-        yield _sc(rid, ct, mn, f"\n\n[Fast path error: {model}. Please retry.]\n")
-        yield (
-            f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': mn, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-        )
-        yield "data: [DONE]\n\n"
+        yield _sc(sid, ct, mn, f"\n\n[Fast path error: {model}. Please retry.]\n")
+        yield _sc_stop(sid, ct, mn)
+        yield _SSE_DONE
 
 
 # ── Deep-panel synthesis streamer ────────────────────────────────────────────
 
-async def stream_synthesis(ps: Dict[str, Any]) -> AsyncGenerator[str, None]:
-    ct = int(time.time())
-    rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+async def stream_synthesis(
+    ps: dict[str, Any],
+    *,
+    rid: str | None = None,
+    created: int | None = None,
+) -> AsyncGenerator[str, None]:
+    sid, ct = _resolve_sid_ct(ps, rid, created)
     mn = ps["requested_model"]
     sy = ps["synthesizer"]
     fb = ps.get("fallback_synthesizer", "")
@@ -168,43 +186,38 @@ async def stream_synthesis(ps: Dict[str, Any]) -> AsyncGenerator[str, None]:
     sub_tasks = ps.get("sub_tasks")
 
     if EMIT_STATUS_UPDATES:
-        yield _sc(rid, ct, mn, f"🧠 Drafts from {len(ws)} models ({', '.join(ws)})\n")
+        yield _sc(sid, ct, mn, f"🧠 Drafts from {len(ws)} models ({', '.join(ws)})\n")
         if sub_tasks:
-            yield _sc(rid, ct, mn, f"📋 Planned: {len(sub_tasks)} sub-tasks\n")
+            yield _sc(sid, ct, mn, f"📋 Planned: {len(sub_tasks)} sub-tasks\n")
         if ps.get("search_performed"):
             search_query = str(ps.get("search_query", "")).strip()
             if search_query:
-                yield _sc(rid, ct, mn, f"🌐 Web search used: {search_query}\n")
+                yield _sc(sid, ct, mn, f"🌐 Web search used: {search_query}\n")
             else:
-                yield _sc(rid, ct, mn, "🌐 Web search used\n")
-        yield _sc(rid, ct, mn, f"✨ Synthesizing with {sy}...\n\n---\n\n")
+                yield _sc(sid, ct, mn, "🌐 Web search used\n")
+        yield _sc(sid, ct, mn, f"✨ Synthesizing with {sy}...\n\n---\n\n")
     if EMIT_ROUTING_BANNER:
-        yield _sc(rid, ct, mn, banner(ps))
+        yield _sc(sid, ct, mn, banner(ps))
 
-    for s in [sy] + ([fb] if fb else []):
+    for synth in filter(None, [sy, fb]):
         try:
             async for item in ollama_chat_stream(
-                s,
+                synth,
                 ps["synthesis_messages"],
                 **model_call_kwargs(ps, temperature=min(ps["temperature"], 0.3)),
             ):
-                msg = item.get("message") or {}
-                c = msg.get("content", "")
+                c = (item.get("message") or {}).get("content", "")
                 if c:
-                    yield (
-                        f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': mn, 'choices': [{'index': 0, 'delta': {'content': c}, 'finish_reason': None}]})}\n\n"
-                    )
+                    yield _sc(sid, ct, mn, c)
                 if item.get("done"):
-                    note_model_success(s)
-                    yield (
-                        f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': mn, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-                    )
-                    yield "data: [DONE]\n\n"
+                    note_model_success(synth)
+                    yield _sc_stop(sid, ct, mn)
+                    yield _SSE_DONE
                     return
-        except Exception:
-            note_model_failure(s)
+        except Exception as e:
+            logger.warning("Synthesis failed for %s: %s", synth, e)
+            note_model_failure(synth)
 
-    yield (
-        f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': mn, 'choices': [{'index': 0, 'delta': {'content': '[Error. Please try again.]'}, 'finish_reason': 'stop'}]})}\n\n"
-    )
-    yield "data: [DONE]\n\n"
+    yield _sc(sid, ct, mn, "[Error. Please try again.]")
+    yield _sc_stop(sid, ct, mn)
+    yield _SSE_DONE
