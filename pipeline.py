@@ -23,6 +23,7 @@ from config import (
     MAX_DEEP_WORKERS,
     MAX_DEEP_WORKERS_CLOUD,
     REFLECTION_ENABLED,
+    REFLECTION_MAX_RETRIES,
     deep_panel_for_model,
     is_cloud_model,
 )
@@ -208,14 +209,22 @@ async def node_plan_panel(s):
             local_count += 1
 
     # Last resort: if health filtering emptied the list entirely,
-    # fall back to the raw config list (capped) so we at least try.
+    # fall back to the raw config list with the same type caps so we
+    # at least try, but don't exceed intended cloud/local balance.
     if not selected:
         logger.warning(
             "All workers unhealthy for %s/%s — falling back to raw config",
             requested, tt,
         )
-        fallback_cap = max_cloud + max_local or MAX_DEEP_WORKERS
-        selected = all_workers[:fallback_cap]
+        fc, fl = 0, 0
+        for w in all_workers:
+            cloud = is_cloud_model(w)
+            if cloud and fc < max_cloud:
+                selected.append(w)
+                fc += 1
+            elif not cloud and fl < max_local:
+                selected.append(w)
+                fl += 1
 
     s["deep_workers"] = selected
     s["synthesizer"] = panel["synthesizer"]
@@ -286,6 +295,15 @@ async def node_parallel_generate(s):
             }
 
     workers = s["deep_workers"]
+
+    if not workers:
+        logger.error("node_parallel_generate called with empty workers list")
+        s["worker_outputs"] = [{
+            "model": "none",
+            "content": "[WORKER_ERROR] No workers available.",
+            "sub_task": "",
+        }]
+        return s
 
     if sub_tasks and len(sub_tasks) >= 2:
         assignments = []
@@ -404,7 +422,7 @@ async def node_reflect_deep(s):
     )
     s["reflection_result"] = reflection
 
-    if reflection["quality"] == "poor" and s.get("reflection_retries", 0) < 1:
+    if reflection["quality"] == "poor" and s.get("reflection_retries", 0) < REFLECTION_MAX_RETRIES:
         s["reflection_retries"] = s.get("reflection_retries", 0) + 1
         logger.info("Deep reflection: quality=poor — re-synthesizing with feedback")
 
