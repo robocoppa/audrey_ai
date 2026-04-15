@@ -19,6 +19,7 @@ from config import (
     FAST_PATH_TIMEOUT,
     PLANNING_ENABLED,
     PLANNING_MIN_TOKENS,
+    REACT_MAX_ROUNDS,
     REFLECTION_ENABLED,
     REFLECTION_MAX_RETRIES,
     ROUTER_MODEL,
@@ -226,7 +227,11 @@ async def run_react_agent(s: Dict[str, Any]) -> Dict[str, Any]:
                 )
 
             content, final_msgs, tool_calls_log = await asyncio.wait_for(
-                state.tool_registry.run_with_tools(chat_fn, msgs),
+                state.tool_registry.run_with_tools(
+                    chat_fn,
+                    msgs,
+                    max_rounds=REACT_MAX_ROUNDS,
+                ),
                 timeout=FAST_PATH_TIMEOUT,
             )
 
@@ -346,6 +351,7 @@ async def adaptive_escalate(s: Dict[str, Any]) -> Dict[str, Any]:
                         run_model_with_tools(
                             model,
                             retry_msgs,
+                            max_tool_rounds=REACT_MAX_ROUNDS,
                             **model_call_kwargs(s),
                         ),
                         timeout=FAST_PATH_TIMEOUT,

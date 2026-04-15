@@ -453,10 +453,11 @@ class ToolRegistry:
         messages: List[Dict[str, Any]],
         *,
         compress_enabled: bool = True,
+        max_rounds: Optional[int] = None,
     ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Run a model with tool calling.  Loops until the model responds with
-        plain text or MAX_TOOL_ROUNDS is reached.
+        plain text or the configured max tool rounds is reached.
 
         Returns: (content, final_messages, tool_calls_log)
             - content: the model's final text response
@@ -473,8 +474,9 @@ class ToolRegistry:
         """
         current = list(messages)
         tool_calls_log: List[Dict[str, Any]] = []  # Track for observability
+        rounds_limit = max(1, int(max_rounds)) if max_rounds is not None else MAX_TOOL_ROUNDS
 
-        for round_num in range(MAX_TOOL_ROUNDS):
+        for round_num in range(rounds_limit):
             # Compress context if we've done enough rounds
             if (
                 compress_enabled
@@ -587,7 +589,7 @@ class ToolRegistry:
                     "result_len": len(result),
                 })
 
-        logger.warning("Max tool rounds (%d) reached", MAX_TOOL_ROUNDS)
+        logger.warning("Max tool rounds (%d) reached", rounds_limit)
         # Final compression before the last attempt
         if compress_enabled:
             current = compress_tool_context(current)

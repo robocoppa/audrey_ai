@@ -177,6 +177,7 @@ async def run_model_with_tools(
     stop: Optional[Any],
     frequency_penalty: Optional[float] = None,
     presence_penalty: Optional[float] = None,
+    max_tool_rounds: Optional[int] = None,
 ) -> str:
     content, _ = await run_model_with_tools_detailed(
         model,
@@ -187,6 +188,7 @@ async def run_model_with_tools(
         stop=stop,
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
+        max_tool_rounds=max_tool_rounds,
     )
     return content
 
@@ -201,6 +203,7 @@ async def run_model_with_tools_detailed(
     stop: Optional[Any],
     frequency_penalty: Optional[float] = None,
     presence_penalty: Optional[float] = None,
+    max_tool_rounds: Optional[int] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """Run a model with tool-calling support via the tool registry.
 
@@ -239,7 +242,11 @@ async def run_model_with_tools_detailed(
         )
 
     try:
-        content, _, tool_calls_log = await state.tool_registry.run_with_tools(chat_fn, msgs)
+        content, _, tool_calls_log = await state.tool_registry.run_with_tools(
+            chat_fn,
+            msgs,
+            max_rounds=max_tool_rounds,
+        )
         return content, tool_calls_log
     except Exception as e:
         logger.error(
