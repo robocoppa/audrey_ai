@@ -54,12 +54,8 @@ model_registry:
       priority: 9
       speed: 4
       quality: 10
-    - name: "nemotron-cascade-2:latest"
-      priority: 7
-      speed: 5
-      quality: 8
     - name: "qwen3.5:35b-a3b"
-      priority: 6
+      priority: 7
       speed: 6
       quality: 8
 
@@ -98,10 +94,10 @@ model_registry:
       priority: 7
       speed: 7
       quality: 8
-    - name: "nemotron-cascade-2:latest"
+    - name: "qwen3.5:35b-a3b"
       priority: 5
-      speed: 5
-      quality: 8
+      speed: 6
+      quality: 9
 # ─── Fast Path ───
 # For high-confidence simple requests, skip the multi-worker deep panel
 # and use a single model from model_registry directly.
@@ -159,7 +155,7 @@ deep_panel:
       - "qwen3.5:397b-cloud"
       - "deepseek-v3.2:cloud"
       - "qwen3.5:35b-a3b"
-    synthesizer: "glm-4.7-flash:q8_0"
+    synthesizer: "qwen3.5:35b-a3b"
     fallback_synthesizer: "glm-5.1:cloud"
 
 # ─── Deep Panel Cloud (all cloud: workers + synthesizer) ───
@@ -202,28 +198,27 @@ deep_panel_local:
       - "qwen3-coder-next:latest"
       - "devstral-small-2:latest"
     synthesizer: "qwen3.5:35b-a3b"
-    fallback_synthesizer: "glm-4.7-flash:q8_0"
+    fallback_synthesizer: "qwen3.5:35b-a3b"
 
   reasoning:
     workers:
       - "deepseek-r1:32b"
-      - "nemotron-cascade-2:latest"
       - "qwen3.5:35b-a3b"
-    synthesizer: "glm-4.7-flash:q8_0"
-    fallback_synthesizer: "nemotron-cascade-2:latest"
+    synthesizer: "qwen3.5:35b-a3b"
+    fallback_synthesizer: "deepseek-r1:32b"
 
   vl:
     workers:
       - "llava:34b"
     synthesizer: "qwen3.5:35b-a3b"
-    fallback_synthesizer: "glm-4.7-flash:q8_0"
+    fallback_synthesizer: "qwen3.5:35b-a3b"
 
   general:
     workers:
       - "qwen3.5:35b-a3b"
-      - "nemotron-cascade-2:latest"
-    synthesizer: "glm-4.7-flash:q8_0"
-    fallback_synthesizer: "qwen3.5:35b-a3b"
+      - "deepseek-r1:32b"
+    synthesizer: "qwen3.5:35b-a3b"
+    fallback_synthesizer: "deepseek-r1:32b"
 
 # ─── Agentic Features ───
 agentic:
@@ -252,7 +247,7 @@ timeouts:
   medium: 180
   large: 360
   cloud: 120
-  deep_worker: 400
+  deep_worker: 600
   fast_path: 180
 
 # ─── Cache ───
