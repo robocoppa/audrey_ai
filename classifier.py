@@ -173,14 +173,14 @@ def keyword_prefilter(text: str, *, user_text: Optional[str] = None) -> Optional
                     "confidence": 0.85,
                     "needs_vision": False,
                     "is_code_review": True,
-                    "route_reason": f"Keyword (code+review override): {p.pattern[:40]} → reasoning",
+                    "route_reason": "keyword: code+review → reasoning",
                 }
             return {
                 "task_type": "code",
                 "confidence": 0.92,
                 "needs_vision": False,
                 "is_code_review": False,
-                "route_reason": f"Keyword (strong code): {p.pattern[:60]}",
+                "route_reason": "keyword: strong code signal",
             }
     # Weak code signals (need 2+)
     w = [p for p in _CW if p.search(text)]
@@ -191,14 +191,14 @@ def keyword_prefilter(text: str, *, user_text: Optional[str] = None) -> Optional
                 "confidence": 0.82,
                 "needs_vision": False,
                 "is_code_review": True,
-                "route_reason": f"Keyword (weak code x{len(w)}+review override) → reasoning",
+                "route_reason": f"keyword: weak code (x{len(w)})+review → reasoning",
             }
         return {
             "task_type": "code",
             "confidence": 0.85,
             "needs_vision": False,
             "is_code_review": False,
-            "route_reason": f"Keyword (weak code x{len(w)})",
+            "route_reason": f"keyword: weak code (x{len(w)})",
         }
     # Reasoning patterns
     for p in _RP:
@@ -208,7 +208,7 @@ def keyword_prefilter(text: str, *, user_text: Optional[str] = None) -> Optional
                 "confidence": 0.80,
                 "needs_vision": False,
                 "is_code_review": False,
-                "route_reason": f"Keyword (reasoning): {p.pattern[:60]}",
+                "route_reason": "keyword: reasoning pattern",
             }
     # General/simple patterns
     for p in _GP:
@@ -218,7 +218,7 @@ def keyword_prefilter(text: str, *, user_text: Optional[str] = None) -> Optional
                 "confidence": 0.95,
                 "needs_vision": False,
                 "is_code_review": False,
-                "route_reason": f"Keyword (general): {p.pattern[:60]}",
+                "route_reason": "keyword: general/simple",
             }
     return None
 
