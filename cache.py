@@ -19,13 +19,51 @@ class LRUCache:
         self._hits = 0
         self._misses = 0
 
-    def _key(self, msgs: List[Dict[str, Any]], model: str, temp: float) -> str:
+    def _key(
+        self,
+        msgs: List[Dict[str, Any]],
+        model: str,
+        temp: float,
+        *,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        stop: Optional[Any] = None,
+        frequency_penalty: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+    ) -> str:
         return hashlib.sha256(
-            json.dumps({"m": msgs, "model": model, "t": temp}, sort_keys=True).encode()
+            json.dumps(
+                {
+                    "m": msgs,
+                    "model": model,
+                    "t": temp,
+                    "max_tokens": max_tokens,
+                    "top_p": top_p,
+                    "stop": stop,
+                    "fp": frequency_penalty,
+                    "pp": presence_penalty,
+                },
+                sort_keys=True,
+            ).encode()
         ).hexdigest()
 
-    def get(self, msgs: List[Dict[str, Any]], model: str, temp: float) -> Optional[str]:
-        k = self._key(msgs, model, temp)
+    def get(
+        self,
+        msgs: List[Dict[str, Any]],
+        model: str,
+        temp: float,
+        *,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        stop: Optional[Any] = None,
+        frequency_penalty: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+    ) -> Optional[str]:
+        k = self._key(
+            msgs, model, temp,
+            max_tokens=max_tokens, top_p=top_p, stop=stop,
+            frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
+        )
         entry = self._store.get(k)
         if entry is None:
             self._misses += 1
@@ -39,8 +77,24 @@ class LRUCache:
         self._hits += 1
         return txt
 
-    def put(self, msgs: List[Dict[str, Any]], model: str, temp: float, txt: str) -> None:
-        k = self._key(msgs, model, temp)
+    def put(
+        self,
+        msgs: List[Dict[str, Any]],
+        model: str,
+        temp: float,
+        txt: str,
+        *,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        stop: Optional[Any] = None,
+        frequency_penalty: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+    ) -> None:
+        k = self._key(
+            msgs, model, temp,
+            max_tokens=max_tokens, top_p=top_p, stop=stop,
+            frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
+        )
         self._store[k] = (time.time(), txt)
         self._store.move_to_end(k)
         while len(self._store) > self._max:

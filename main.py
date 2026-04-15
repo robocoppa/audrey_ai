@@ -8,6 +8,7 @@ All logic lives in dedicated modules; this file wires them together.
 import json
 import logging
 import os
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -52,7 +53,7 @@ from pipeline import (
     node_prepare_synthesis,
     web_search_node,
 )
-from streaming import _sc, banner, stream_synthesis
+from streaming import _sc, _stop, _done, banner, stream_fast_path, stream_synthesis
 from tool_registry import ToolRegistry
 
 logging.basicConfig(
@@ -87,7 +88,31 @@ async def validate_models():
             ", ".join(sorted(local_models)),
         )
 
-        # Warn about configured models that are missing
+        # Critical models — fail loud if missing
+        critical_missing = []
+        if not is_cloud_model(ROUTER_MODEL) and ROUTER_MODEL not in local_models:
+            critical_missing.append(f"router: {ROUTER_MODEL}")
+
+        # Collect all configured synthesizers as important (not workers)
+        synthesizers = set()
+        for panel_set in [DEEP_PANEL_MIXED, DEEP_PANEL_CLOUD, DEEP_PANEL_LOCAL]:
+            for cat in panel_set.values():
+                s = cat.get("synthesizer", "")
+                if s and not is_cloud_model(s):
+                    synthesizers.add(s)
+        for s in sorted(synthesizers):
+            if s not in local_models:
+                critical_missing.append(f"synthesizer: {s}")
+
+        if critical_missing:
+            for cm in critical_missing:
+                logger.error("🚨 CRITICAL model missing from Ollama: %s", cm)
+            logger.error(
+                "Audrey will start but critical requests WILL FAIL. "
+                "Pull the missing models or update config.yaml."
+            )
+
+        # Warn about non-critical configured models that are missing
         configured = set()
         for category in MODEL_REGISTRY.values():
             for entry in category:
@@ -174,7 +199,7 @@ async def verify_api_key(req: Request):
     if not API_KEY:
         return
     auth = req.headers.get("Authorization", "")
-    if not auth.startswith("Bearer ") or auth[7:] != API_KEY:
+    if not auth.startswith("Bearer ") or not secrets.compare_digest(auth[7:], API_KEY):
         raise HTTPException(401, "Invalid or missing API key")
 
 
@@ -244,16 +269,32 @@ async def rediscover_tools():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Request dispatch
+#  Cache helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _cache_kw(req) -> dict:
+    """Build the extra keyword args for cache.get / cache.put."""
+    return {
+        "max_tokens": req.max_tokens,
+        "top_p": req.top_p,
+        "stop": req.stop,
+        "frequency_penalty": req.frequency_penalty,
+        "presence_penalty": req.presence_penalty,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Request dispatch (non-streaming)
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def run_graph_dispatch(req, *, stream_prepare_only=False):
     msgs_raw = [m.model_dump() for m in req.messages]
     temp = req.temperature if req.temperature is not None else DEFAULT_TEMPERATURE
+    ckw = _cache_kw(req)
 
     # Cache check
     if CACHE_ENABLED and not req.stream:
-        cached = cache.get(msgs_raw, req.model, temp)
+        cached = cache.get(msgs_raw, req.model, temp, **ckw)
         if cached is not None:
             logger.info("Cache hit for model=%s", req.model)
             return {
@@ -311,7 +352,7 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
         if r.get("use_fast_path") and r.get("result_text") and not r.get("escalated"):
             r["latency_ms"] = int((time.time() - s["started_at"]) * 1000)
             if CACHE_ENABLED:
-                cache.put(msgs_raw, req.model, temp, r["result_text"])
+                cache.put(msgs_raw, req.model, temp, r["result_text"], **ckw)
             logger.info(
                 json.dumps(
                     {
@@ -350,7 +391,7 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
     r["latency_ms"] = int((time.time() - s["started_at"]) * 1000)
 
     if CACHE_ENABLED and not stream_prepare_only and r.get("result_text"):
-        cache.put(msgs_raw, req.model, temp, r["result_text"])
+        cache.put(msgs_raw, req.model, temp, r["result_text"], **ckw)
 
     logger.info(
         json.dumps(
@@ -394,129 +435,90 @@ async def chat_completions(req: ChatCompletionRequest):
             ct = int(time.time())
             rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
 
-            if EMIT_STATUS_UPDATES:
-                yield _sc(rid, ct, req.model, "🔍 Analyzing...\n")
+            try:
+                if EMIT_STATUS_UPDATES:
+                    yield _sc(rid, ct, req.model, "🔍 Analyzing...\n")
 
-            init_state = {
-                "request_id": str(uuid.uuid4()),
-                "requested_model": req.model,
-                "messages": [m.model_dump() for m in req.messages],
-                "stream": True,
-                "temperature": (
+                temp = (
                     req.temperature
                     if req.temperature is not None
                     else DEFAULT_TEMPERATURE
-                ),
-                "max_tokens": req.max_tokens,
-                "top_p": req.top_p,
-                "stop": req.stop,
-                "frequency_penalty": req.frequency_penalty,
-                "presence_penalty": req.presence_penalty,
-                "errors": [],
-                "started_at": time.time(),
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "search_performed": False,
-                "search_query": "",
-                "search_results": [],
-                "use_fast_path": False,
-                "fast_model": "",
-                "sub_tasks": None,
-                "react_rounds": 0,
-                "reflection_result": {},
-                "reflection_retries": 0,
-                "escalated": False,
-                "tools_used": [],
-            }
+                )
+                ckw = _cache_kw(req)
 
-            # ── Fast path attempt (audrey_deep only) ──
-            # Run the real FAST_GRAPH non-streaming so we get full ReAct
-            # agent loop, tool-calling, reflection, and adaptive escalation
-            # — identical behavior to the non-streaming code path.
-            # If fast path succeeds, we stream the completed result text.
-            # If it escalates or fails, we fall through to deep panel.
-            fast_result = None
-            if FAST_PATH_ENABLED and req.model == "audrey_deep":
-                fast_result = await FAST_GRAPH.ainvoke(init_state)
+                init_state = {
+                    "request_id": str(uuid.uuid4()),
+                    "requested_model": req.model,
+                    "messages": [m.model_dump() for m in req.messages],
+                    "stream": True,
+                    "temperature": temp,
+                    "max_tokens": req.max_tokens,
+                    "top_p": req.top_p,
+                    "stop": req.stop,
+                    "frequency_penalty": req.frequency_penalty,
+                    "presence_penalty": req.presence_penalty,
+                    "errors": [],
+                    "started_at": time.time(),
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "search_performed": False,
+                    "search_query": "",
+                    "search_results": [],
+                    "use_fast_path": False,
+                    "fast_model": "",
+                    "sub_tasks": None,
+                    "react_rounds": 0,
+                    "reflection_result": {},
+                    "reflection_retries": 0,
+                    "escalated": False,
+                    "tools_used": [],
+                }
 
-                if (
-                    fast_result.get("use_fast_path")
-                    and fast_result.get("result_text")
-                    and not fast_result.get("escalated")
-                ):
-                    # Fast path succeeded — stream the completed result
-                    if fast_result.get("search_performed"):
-                        yield _sc(rid, ct, req.model, "🌐 Search completed\n")
-                    if EMIT_STATUS_UPDATES:
-                        fm = fast_result.get("fast_model", "")
-                        rounds = fast_result.get("react_rounds", 0)
-                        tools_used = fast_result.get("tools_used", [])
-                        parts = [f"⚡ Fast path (ReAct): {fm}"]
-                        if rounds:
-                            parts.append(f" | {rounds} tool round{'s' if rounds > 1 else ''}")
-                        if tools_used:
-                            names = list(dict.fromkeys(t.get("tool", "") for t in tools_used))
-                            short = [n.split("__", 1)[-1] if "__" in n else n for n in names]
-                            parts.append(f" | 🔧 {', '.join(short)}")
-                        yield _sc(rid, ct, req.model, "".join(parts) + "\n")
-                    if EMIT_ROUTING_BANNER:
-                        yield _sc(rid, ct, req.model, banner(fast_result))
+                # Classify + web search
+                classified = await node_classify(init_state)
+                searched = await web_search_node(classified)
 
-                    # Stream the result text in chunks for a natural feel
-                    text = fast_result["result_text"]
-                    chunk_size = 12  # characters per SSE chunk
-                    for i in range(0, len(text), chunk_size):
-                        yield _sc(rid, ct, req.model, text[i : i + chunk_size])
+                if searched.get("search_performed"):
+                    yield _sc(rid, ct, req.model, "🌐 Search completed\n")
 
-                    if CACHE_ENABLED:
+                # ── Fast path (real streaming via stream_fast_path) ──
+                if searched.get("use_fast_path") and searched.get("fast_model"):
+                    async for chunk in stream_fast_path(searched):
+                        yield chunk
+
+                    # Cache the result if streaming completed successfully
+                    if CACHE_ENABLED and searched.get("result_text"):
                         cache.put(
                             [m.model_dump() for m in req.messages],
                             req.model,
-                            init_state["temperature"],
-                            text,
+                            temp,
+                            searched["result_text"],
+                            **ckw,
                         )
-
-                    yield (
-                        f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': req.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-                    )
-                    yield "data: [DONE]\n\n"
                     return
 
-                # Fast path was skipped, failed, or escalated — continue to deep panel
-                if fast_result.get("escalated"):
-                    if EMIT_STATUS_UPDATES:
-                        yield _sc(rid, ct, req.model, "📈 Escalating to deep panel...\n")
+                # ── Deep panel path ──
+                planned = await node_plan_panel(searched)
+                if planned.get("sub_tasks"):
+                    yield _sc(
+                        rid,
+                        ct,
+                        req.model,
+                        f"📋 Planning: {len(planned['sub_tasks'])} sub-tasks\n",
+                    )
+                generated = await node_parallel_generate(planned)
+                prepared = await node_prepare_synthesis(generated)
+                async for chunk in stream_synthesis(prepared):
+                    yield chunk
 
-            # ── Deep panel path ──
-            # Use the state from the fast path attempt if it ran (carries
-            # forward classification, search results, escalation info),
-            # otherwise use init_state.
-            deep_state = fast_result if fast_result is not None else init_state
-
-            # If fast_result already ran classify + web_search, skip to planning.
-            # Otherwise we need to classify and search first.
-            if fast_result is not None:
-                # Already classified and searched by FAST_GRAPH
-                searched = deep_state
-            else:
-                classified = await node_classify(deep_state)
-                searched = await web_search_node(classified)
-
-            if searched.get("search_performed"):
-                yield _sc(rid, ct, req.model, "🌐 Search completed\n")
-
-            planned = await node_plan_panel(searched)
-            if planned.get("sub_tasks"):
+            except Exception:
+                logger.exception("Streaming error for %s", req.model)
                 yield _sc(
-                    rid,
-                    ct,
-                    req.model,
-                    f"📋 Planning: {len(planned['sub_tasks'])} sub-tasks\n",
+                    rid, ct, req.model,
+                    "\n\n[Internal error. Please try again.]\n",
                 )
-            generated = await node_parallel_generate(planned)
-            prepared = await node_prepare_synthesis(generated)
-            async for chunk in stream_synthesis(prepared):
-                yield chunk
+                yield _stop(rid, ct, req.model)
+                yield _done()
 
         return StreamingResponse(_stream(), media_type="text/event-stream")
 
