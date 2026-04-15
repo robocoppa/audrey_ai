@@ -29,6 +29,7 @@ from config import (
 )
 from health import is_model_healthy, note_model_failure, note_model_success
 from helpers import (
+    extract_web_search_info,
     ensure_state_defaults,
     estimate_tokens,
     flatten_messages,
@@ -37,7 +38,7 @@ from helpers import (
     role_prompt,
 )
 from models import AudreyState
-from ollama import run_model_once, run_model_with_tools
+from ollama import run_model_once, run_model_with_tools_detailed
 from helpers import get_last_user_text
 
 logger = logging.getLogger("audrey.pipeline")
@@ -273,8 +274,8 @@ async def node_parallel_generate(s):
 
         sys = {"role": "system", "content": sys_content}
         try:
-            t = await asyncio.wait_for(
-                run_model_with_tools(
+            t, tool_calls_log = await asyncio.wait_for(
+                run_model_with_tools_detailed(
                     wn,
                     [sys, *base],
                     **model_call_kwargs(s),
@@ -288,6 +289,7 @@ async def node_parallel_generate(s):
                 "content": t,
                 "sub_task": sub_task or "",
                 "label": label,
+                "tools_used": tool_calls_log,
             }
         except Exception as e:
             note_model_failure(wn)
@@ -298,6 +300,7 @@ async def node_parallel_generate(s):
                 "model": wn,
                 "content": "[WORKER_ERROR] Unable to respond.",
                 "sub_task": sub_task or "",
+                "tools_used": [],
             }
 
     workers = s["deep_workers"]
@@ -347,7 +350,17 @@ async def node_parallel_generate(s):
         outs = []
 
     valid = [o for o in outs if not o["content"].startswith("[WORKER_ERROR]")]
-    s["worker_outputs"] = valid or outs
+    selected_outputs = valid or outs
+    s["worker_outputs"] = selected_outputs
+
+    merged_tool_calls = []
+    for out in selected_outputs:
+        merged_tool_calls.extend(out.get("tools_used", []))
+    s["tools_used"] = merged_tool_calls
+
+    used_web_search, query = extract_web_search_info(merged_tool_calls)
+    s["search_performed"] = used_web_search
+    s["search_query"] = query
     return s
 
 

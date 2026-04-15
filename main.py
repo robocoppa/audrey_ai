@@ -54,7 +54,7 @@ from pipeline import (
     node_plan_panel,
     node_prepare_synthesis,
 )
-from streaming import _sc, banner, stream_fast_path, stream_synthesis
+from streaming import _sc, banner, stream_synthesis
 from tool_registry import ToolRegistry
 
 logging.basicConfig(
@@ -67,6 +67,7 @@ _FAST_ONLY_FALLBACK_TEXT = (
     "audrey_fast could not complete this request in fast mode. "
     "Try again, or use audrey_deep for full deep-panel fallback."
 )
+_STREAM_RESULT_CHUNK_CHARS = 1200
 
 
 async def _await_stream_stage(
@@ -603,8 +604,98 @@ async def chat_completions(req: ChatCompletionRequest):
 
             # Decide path — search is handled by tool-calling during generation
             if classified.get("use_fast_path") and classified.get("fast_model"):
-                async for chunk in stream_fast_path(classified):
-                    yield chunk
+                if EMIT_STATUS_UPDATES:
+                    yield _sc(
+                        rid,
+                        ct,
+                        req.model,
+                        "⚡ Running fast path with tools/search...\n",
+                    )
+
+                fast_result = None
+                async for chunk, result in _await_stream_stage(
+                    FAST_GRAPH.ainvoke(classified),
+                    rid=rid,
+                    created=ct,
+                    model_name=req.model,
+                    request_id=request_id,
+                    stage="fast_graph",
+                    heartbeat_text="Still running fast path (tools/search)",
+                ):
+                    if chunk is not None:
+                        yield chunk
+                    else:
+                        fast_result = result
+
+                if fast_result is None:
+                    raise RuntimeError("Fast graph completed without a result")
+
+                if (
+                    fast_result.get("use_fast_path")
+                    and fast_result.get("result_text")
+                    and not fast_result.get("escalated")
+                ):
+                    if req.model == "audrey_fast":
+                        state.update_audrey_fast_health(
+                            selected_model=fast_result.get(
+                                "selected_model",
+                                fast_result.get("fast_model", "none"),
+                            ),
+                            success=True,
+                            reason=fast_result.get("route_reason", "fast_only:completed"),
+                        )
+                    if EMIT_STATUS_UPDATES:
+                        yield _sc(
+                            rid,
+                            ct,
+                            req.model,
+                            f"⚡ Fast path complete: {fast_result.get('selected_model', fast_result.get('fast_model', '?'))}\n\n",
+                        )
+                        if fast_result.get("search_performed"):
+                            search_query = str(fast_result.get("search_query", "")).strip()
+                            if search_query:
+                                yield _sc(
+                                    rid,
+                                    ct,
+                                    req.model,
+                                    f"🌐 Web search used: {search_query}\n",
+                                )
+                            else:
+                                yield _sc(rid, ct, req.model, "🌐 Web search used\n")
+                    if EMIT_ROUTING_BANNER:
+                        yield _sc(rid, ct, req.model, banner(fast_result))
+
+                    content = fast_result["result_text"]
+                    if content:
+                        for i in range(0, len(content), _STREAM_RESULT_CHUNK_CHARS):
+                            yield _sc(
+                                rid,
+                                ct,
+                                req.model,
+                                content[i : i + _STREAM_RESULT_CHUNK_CHARS],
+                            )
+
+                    yield (
+                        f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': req.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+                    )
+                    yield "data: [DONE]\n\n"
+                    return
+
+                if req.model == "audrey_fast":
+                    state.update_audrey_fast_health(
+                        selected_model=fast_result.get("selected_model", "none"),
+                        success=False,
+                        reason=fast_result.get("route_reason", "fast_only:fallback"),
+                    )
+                    yield _sc(rid, ct, req.model, f"{_FAST_ONLY_FALLBACK_TEXT}\n")
+                    yield (
+                        f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': req.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+                    )
+                    yield "data: [DONE]\n\n"
+                    return
+
+                # Fast path was skipped/failed/escalated in audrey_deep, so continue to deep panel.
+                classified = fast_result
             else:
                 if req.model == "audrey_fast":
                     state.update_audrey_fast_health(

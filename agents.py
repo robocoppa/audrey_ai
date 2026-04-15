@@ -27,6 +27,7 @@ from config import (
 )
 from health import note_model_failure, note_model_success
 from helpers import (
+    extract_web_search_info,
     estimate_tokens,
     flatten_messages,
     get_last_user_text,
@@ -236,6 +237,9 @@ async def run_react_agent(s: Dict[str, Any]) -> Dict[str, Any]:
             )
             s["react_rounds"] = tool_rounds
             s["tools_used"] = tool_calls_log
+            used_web_search, search_query = extract_web_search_info(tool_calls_log)
+            s["search_performed"] = used_web_search
+            s["search_query"] = search_query
             if tool_calls_log:
                 tool_names = list(dict.fromkeys(t["tool"] for t in tool_calls_log))
                 logger.info(
@@ -253,6 +257,8 @@ async def run_react_agent(s: Dict[str, Any]) -> Dict[str, Any]:
                 timeout=FAST_PATH_TIMEOUT,
             )
             s["react_rounds"] = 0
+            s["search_performed"] = False
+            s["search_query"] = ""
 
         note_model_success(model)
         s["result_text"] = content

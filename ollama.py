@@ -8,7 +8,7 @@ model runners with optional tool-calling support.
 import json
 import logging
 import traceback
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -178,6 +178,30 @@ async def run_model_with_tools(
     frequency_penalty: Optional[float] = None,
     presence_penalty: Optional[float] = None,
 ) -> str:
+    content, _ = await run_model_with_tools_detailed(
+        model,
+        msgs,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        top_p=top_p,
+        stop=stop,
+        frequency_penalty=frequency_penalty,
+        presence_penalty=presence_penalty,
+    )
+    return content
+
+
+async def run_model_with_tools_detailed(
+    model: str,
+    msgs: List[Dict[str, Any]],
+    *,
+    temperature: float,
+    max_tokens: Optional[int],
+    top_p: Optional[float],
+    stop: Optional[Any],
+    frequency_penalty: Optional[float] = None,
+    presence_penalty: Optional[float] = None,
+) -> Tuple[str, List[Dict[str, Any]]]:
     """Run a model with tool-calling support via the tool registry.
 
     Falls back to run_model_once when:
@@ -195,12 +219,13 @@ async def run_model_with_tools(
     ):
         if not model_supports_tools and TOOLS_ENABLED:
             logger.debug("Model %s not in TOOL_CAPABLE_MODELS — skipping tools", model)
-        return await run_model_once(
+        content = await run_model_once(
             model, msgs,
             temperature=temperature, max_tokens=max_tokens, top_p=top_p,
             stop=stop,
             frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
         )
+        return content, []
 
     tool_defs = state.tool_registry.tool_definitions
 
@@ -214,8 +239,8 @@ async def run_model_with_tools(
         )
 
     try:
-        content, _, _ = await state.tool_registry.run_with_tools(chat_fn, msgs)
-        return content
+        content, _, tool_calls_log = await state.tool_registry.run_with_tools(chat_fn, msgs)
+        return content, tool_calls_log
     except Exception as e:
         logger.error(
             "run_model_with_tools failed for %s: %s\n%s",

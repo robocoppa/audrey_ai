@@ -7,6 +7,7 @@ injection, and worker role prompts.
 
 import time
 import re
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -126,6 +127,43 @@ def flatten_messages(msgs: List[Dict[str, Any]]) -> str:
             )
         parts.append(f"{m.get('role', 'user').upper()}: {c}")
     return "\n\n".join(parts)
+
+
+def extract_web_search_info(tool_calls_log: List[Dict[str, Any]]) -> tuple[bool, str]:
+    """Return (used_web_search, query) from tool observability logs."""
+    if not tool_calls_log:
+        return False, ""
+
+    for call in tool_calls_log:
+        tool_name = str(call.get("tool", "")).lower()
+        # Primary signal for the bundled custom tools server.
+        is_web_search = (
+            tool_name == "web_search"
+            or tool_name.endswith("__web_search")
+            or "web_search" in tool_name
+        )
+        if not is_web_search:
+            continue
+
+        query = str(call.get("query", "")).strip()
+        if query:
+            return True, query
+
+        # Backward-compatible fallback for older logs without a dedicated query field.
+        args_preview = str(call.get("args_preview", "")).strip()
+        if not args_preview:
+            return True, ""
+        try:
+            parsed = json.loads(args_preview)
+            if isinstance(parsed, dict):
+                query = str(parsed.get("query", "")).strip()
+                if query:
+                    return True, query
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return True, ""
+
+    return False, ""
 
 
 def has_vision_content(msgs: List[Dict[str, Any]]) -> bool:

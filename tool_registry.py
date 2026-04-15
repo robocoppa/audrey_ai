@@ -575,9 +575,14 @@ class ToolRegistry:
                 current.append({"role": "tool", "content": result})
 
                 # Track for observability
+                query = args.get("query", "")
+                if query is None:
+                    query = ""
+                query = str(query)
                 tool_calls_log.append({
                     "round": round_num + 1,
                     "tool": name,
+                    "query": query[:200],
                     "args_preview": json.dumps(args, default=str)[:100],
                     "result_len": len(result),
                 })

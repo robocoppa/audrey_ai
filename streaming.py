@@ -171,6 +171,12 @@ async def stream_synthesis(ps: Dict[str, Any]) -> AsyncGenerator[str, None]:
         yield _sc(rid, ct, mn, f"🧠 Drafts from {len(ws)} models ({', '.join(ws)})\n")
         if sub_tasks:
             yield _sc(rid, ct, mn, f"📋 Planned: {len(sub_tasks)} sub-tasks\n")
+        if ps.get("search_performed"):
+            search_query = str(ps.get("search_query", "")).strip()
+            if search_query:
+                yield _sc(rid, ct, mn, f"🌐 Web search used: {search_query}\n")
+            else:
+                yield _sc(rid, ct, mn, "🌐 Web search used\n")
         yield _sc(rid, ct, mn, f"✨ Synthesizing with {sy}...\n\n---\n\n")
     if EMIT_ROUTING_BANNER:
         yield _sc(rid, ct, mn, banner(ps))
