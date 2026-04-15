@@ -378,55 +378,48 @@ async def chat_completions(req: ChatCompletionRequest):
         async def _stream():
             ct = int(time.time())
             rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-            try:
-                if EMIT_STATUS_UPDATES:
-                    yield _sc(rid, ct, req.model, "🔍 Analyzing...\n")
 
-                init_state = build_initial_state(
-                    request_id=str(uuid.uuid4()),
-                    requested_model=req.model,
-                    messages=[m.model_dump() for m in req.messages],
-                    stream=True,
-                    temperature=(
-                        req.temperature
-                        if req.temperature is not None
-                        else DEFAULT_TEMPERATURE
-                    ),
-                    max_tokens=req.max_tokens,
-                    top_p=req.top_p,
-                    stop=req.stop,
-                    frequency_penalty=req.frequency_penalty,
-                    presence_penalty=req.presence_penalty,
-                )
+            if EMIT_STATUS_UPDATES:
+                yield _sc(rid, ct, req.model, "🔍 Analyzing...\n")
 
-                # Classify (also initializes search fields and original_messages)
-                classified = await node_classify(init_state)
+            init_state = build_initial_state(
+                request_id=str(uuid.uuid4()),
+                requested_model=req.model,
+                messages=[m.model_dump() for m in req.messages],
+                stream=True,
+                temperature=(
+                    req.temperature
+                    if req.temperature is not None
+                    else DEFAULT_TEMPERATURE
+                ),
+                max_tokens=req.max_tokens,
+                top_p=req.top_p,
+                stop=req.stop,
+                frequency_penalty=req.frequency_penalty,
+                presence_penalty=req.presence_penalty,
+            )
 
-                # Decide path — search is handled by tool-calling during generation
-                if classified.get("use_fast_path") and classified.get("fast_model"):
-                    async for chunk in stream_fast_path(classified):
-                        yield chunk
-                else:
-                    # Deep panel
-                    planned = await node_plan_panel(classified)
-                    if planned.get("sub_tasks"):
-                        yield _sc(
-                            rid,
-                            ct,
-                            req.model,
-                            f"📋 Planning: {len(planned['sub_tasks'])} sub-tasks\n",
-                        )
-                    generated = await node_parallel_generate(planned)
-                    prepared = await node_prepare_synthesis(generated)
-                    async for chunk in stream_synthesis(prepared):
-                        yield chunk
-            except Exception:
-                logger.exception("Streaming request failed for model=%s", req.model)
-                yield _sc(rid, ct, req.model, "[Error. Please try again.]\n")
-                yield (
-                    f"data: {json.dumps({'id': rid, 'object': 'chat.completion.chunk', 'created': ct, 'model': req.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-                )
-                yield "data: [DONE]\n\n"
+            # Classify (also initializes search fields and original_messages)
+            classified = await node_classify(init_state)
+
+            # Decide path — search is handled by tool-calling during generation
+            if classified.get("use_fast_path") and classified.get("fast_model"):
+                async for chunk in stream_fast_path(classified):
+                    yield chunk
+            else:
+                # Deep panel
+                planned = await node_plan_panel(classified)
+                if planned.get("sub_tasks"):
+                    yield _sc(
+                        rid,
+                        ct,
+                        req.model,
+                        f"📋 Planning: {len(planned['sub_tasks'])} sub-tasks\n",
+                    )
+                generated = await node_parallel_generate(planned)
+                prepared = await node_prepare_synthesis(generated)
+                async for chunk in stream_synthesis(prepared):
+                    yield chunk
 
         return StreamingResponse(_stream(), media_type="text/event-stream")
 
