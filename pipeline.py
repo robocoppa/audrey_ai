@@ -540,14 +540,20 @@ def _synthesis_escalation_reason(s: dict[str, Any]) -> str:
         o for o in s.get("worker_outputs", [])
         if _is_valid_worker_output(o)
     ]
-    deep_worker_count = len(s.get("deep_workers", []))
+    deep_workers = [str(w).strip() for w in s.get("deep_workers", []) if str(w).strip()]
+    deep_worker_count = len(deep_workers)
+    all_workers_local = bool(deep_workers) and all(
+        not is_cloud_model(worker) for worker in deep_workers
+    )
     if deep_worker_count > 1 and len(worker_outputs) <= 1:
         return "single_valid_draft"
 
-    if _has_uncertain_draft(worker_outputs):
+    # For all-local panels, prefer warm-worker synthesis unless a hard signal
+    # (low confidence / worker failures) requires strong configured synth first.
+    if not all_workers_local and _has_uncertain_draft(worker_outputs):
         return "draft_uncertainty"
 
-    if _has_draft_conflict(worker_outputs, s.get("sub_tasks")):
+    if not all_workers_local and _has_draft_conflict(worker_outputs, s.get("sub_tasks")):
         return "draft_conflict"
 
     return ""

@@ -204,6 +204,7 @@ async def _await_stream_stage(
     request_id: str,
     stage: str,
     heartbeat_text: str,
+    heartbeat_style: str = "line",
 ) -> AsyncGenerator[tuple[str | None, Any], None]:
     started = time.monotonic()
     emitted_heartbeat_text = False
@@ -242,9 +243,12 @@ async def _await_stream_stage(
                     stage,
                     elapsed_ms,
                 )
-                if emitted_heartbeat_text and EMIT_STATUS_UPDATES:
+                if EMIT_STATUS_UPDATES and heartbeat_style == "append_seconds":
+                    tail = ")\n" if emitted_heartbeat_text else "\n"
+                    yield (_sc(rid, created, model_name, tail), _STREAM_STAGE_DONE)
+                elif emitted_heartbeat_text and EMIT_STATUS_UPDATES:
                     # Finalize the in-place heartbeat row before next stage output.
-                    yield (_sc(rid, created, model_name, "\n"), _STREAM_STAGE_DONE)
+                    yield (_sc(rid, created, model_name, ")\n"), _STREAM_STAGE_DONE)
                 yield None, result
                 return
             except asyncio.TimeoutError:
@@ -276,11 +280,18 @@ async def _await_stream_stage(
                         _STREAM_STAGE_DONE,
                     )
                 if EMIT_STATUS_UPDATES:
-                    if not emitted_heartbeat_text:
-                        emitted_heartbeat_text = True
-                        chunk_text = f"⏳ {heartbeat_text} ({elapsed_s}s"
+                    if heartbeat_style == "append_seconds":
+                        if not emitted_heartbeat_text:
+                            emitted_heartbeat_text = True
+                            chunk_text = f" ({elapsed_s}s"
+                        else:
+                            chunk_text = f", {elapsed_s}s"
                     else:
-                        chunk_text = f", {elapsed_s}s"
+                        if not emitted_heartbeat_text:
+                            emitted_heartbeat_text = True
+                            chunk_text = f"⏳ {heartbeat_text} ({elapsed_s}s"
+                        else:
+                            chunk_text = f", {elapsed_s}s"
                     yield (_sc(rid, created, model_name, chunk_text), _STREAM_STAGE_DONE)
     except Exception:
         elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -1114,7 +1125,7 @@ async def chat_completions(req: ChatCompletionRequest):
                         rid,
                         ct,
                         req.model,
-                        f"🧠 Generating drafts from {len(planned.get('deep_workers', []))} models...\n",
+                        f"🧠 Generating drafts from {len(planned.get('deep_workers', []))} models...",
                     )
 
                 generated = None
@@ -1126,6 +1137,7 @@ async def chat_completions(req: ChatCompletionRequest):
                     request_id=request_id,
                     stage="parallel_generate",
                     heartbeat_text="Still generating worker drafts",
+                    heartbeat_style="append_seconds",
                 ):
                     if chunk is not None:
                         yield chunk
