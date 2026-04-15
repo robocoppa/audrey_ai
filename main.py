@@ -206,6 +206,7 @@ async def _await_stream_stage(
     heartbeat_text: str,
 ) -> AsyncGenerator[tuple[str | None, Any], None]:
     started = time.monotonic()
+    emitted_heartbeat_text = False
     logger.info(
         "Streaming stage started rid=%s stage=%s model=%s",
         request_id,
@@ -240,6 +241,9 @@ async def _await_stream_stage(
                     stage,
                     elapsed_ms,
                 )
+                if emitted_heartbeat_text and EMIT_STATUS_UPDATES:
+                    # Finalize the in-place heartbeat row before next stage output.
+                    yield (_sc(rid, created, model_name, "\n"), _STREAM_STAGE_DONE)
                 yield None, result
                 return
             except asyncio.TimeoutError:
@@ -267,13 +271,14 @@ async def _await_stream_stage(
                         _sc_event(rid, created, model_name, heartbeat_event),
                         _STREAM_STAGE_DONE,
                     )
-                elif EMIT_STATUS_UPDATES:
+                if EMIT_STATUS_UPDATES:
+                    emitted_heartbeat_text = True
                     yield (
                         _sc(
                             rid,
                             created,
                             model_name,
-                            f"⏳ {heartbeat_text} ({elapsed_s}s)\n",
+                            f"\r⏳ {heartbeat_text} ({elapsed_s}s)",
                         ),
                         _STREAM_STAGE_DONE,
                     )

@@ -216,7 +216,7 @@ curl -N http://localhost:8000/v1/chat/completions \
 | `EMIT_STATUS_UPDATES` | `true` | Show status updates during streaming |
 | `EMIT_TIMELINE_EVENTS` | `true` | Emit structured timeline events in streaming chunks |
 | `EMIT_TRUST_SIGNALS` | `true` | Include trust metadata in responses and streaming events |
-| `STREAM_HEARTBEAT_SECONDS` | `15` | Emit "still working" streaming updates while long stages are running |
+| `STREAM_HEARTBEAT_SECONDS` | `20` | Emit "still working" streaming updates while long stages are running |
 | `COMPLEXITY_FORCE_DEEP` | `true` | Force deep panel for large inputs |
 | `COMPLEXITY_TOKEN_THRESHOLD` | `500` | Estimated token threshold for deep-panel forcing |
 | `REACT_MAX_ROUNDS` | `3` | Maximum ReAct/tool rounds |

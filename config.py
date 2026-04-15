@@ -71,7 +71,7 @@ GPU_CONCURRENCY = int(os.getenv("GPU_CONCURRENCY", "1"))
 EMIT_STATUS_UPDATES = os.getenv("EMIT_STATUS_UPDATES", "true").lower() == "true"
 EMIT_TIMELINE_EVENTS = os.getenv("EMIT_TIMELINE_EVENTS", "true").lower() == "true"
 EMIT_TRUST_SIGNALS = os.getenv("EMIT_TRUST_SIGNALS", "true").lower() == "true"
-STREAM_HEARTBEAT_SECONDS = int(os.getenv("STREAM_HEARTBEAT_SECONDS", "15"))
+STREAM_HEARTBEAT_SECONDS = int(os.getenv("STREAM_HEARTBEAT_SECONDS", "20"))
 DEEP_WORKER_TIMEOUT = int(
     os.getenv("DEEP_WORKER_TIMEOUT", str(TIMEOUTS.get("deep_worker", 240)))
 )

@@ -559,11 +559,24 @@ def resolve_synthesis_candidates(s: dict[str, Any]) -> list[str]:
     deep_workers = [str(w).strip() for w in s.get("deep_workers", []) if str(w).strip()]
     warm_local_workers = _local_worker_models_for_synth(s)
     all_workers_local = bool(deep_workers) and all(not is_cloud_model(w) for w in deep_workers)
+    primary_is_local = bool(primary) and not is_cloud_model(primary)
+    primary_is_warm = primary in warm_local_workers
+    mixed_workers = bool(deep_workers) and not all_workers_local
+    mixed_warm_allowed = (
+        mixed_workers
+        and warm_local_workers
+        and primary_is_local
+        and not primary_is_warm
+    )
     escalation_reason = _synthesis_escalation_reason(s)
 
-    if warm_local_workers and all_workers_local and not escalation_reason:
+    if warm_local_workers and (all_workers_local or mixed_warm_allowed) and not escalation_reason:
         ordered = [*warm_local_workers, primary, fallback]
-        strategy = "warm_worker_first"
+        strategy = (
+            "warm_worker_first"
+            if all_workers_local
+            else "warm_worker_first_mixed_avoid_new_local_load"
+        )
     elif escalation_reason:
         ordered = [primary, *warm_local_workers, fallback]
         strategy = "configured_first_escalated"
