@@ -250,7 +250,24 @@ async def _await_stream_stage(
                     stage,
                     elapsed_s,
                 )
-                if EMIT_STATUS_UPDATES:
+                if EMIT_TIMELINE_EVENTS:
+                    heartbeat_event = {
+                        "stage": stage,
+                        "status": "pending",
+                        "message": heartbeat_text,
+                        "details": {
+                            "elapsed_s": elapsed_s,
+                            # Clients can use this key to replace one banner/timer row
+                            # instead of appending a new line per heartbeat tick.
+                            "replace": True,
+                            "replace_key": f"heartbeat:{stage}",
+                        },
+                    }
+                    yield (
+                        _sc_event(rid, created, model_name, heartbeat_event),
+                        _STREAM_STAGE_DONE,
+                    )
+                elif EMIT_STATUS_UPDATES:
                     yield (
                         _sc(
                             rid,
