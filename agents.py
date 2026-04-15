@@ -176,7 +176,8 @@ For each request:
 If web search results are already provided in context, use them directly rather than
 searching again unless you need additional information.
 
-Be thorough but efficient — use tools only when they add value."""
+Be thorough but efficient — use tools only when they add value.
+Do NOT wrap your entire response in a code block or code fence. Use code fences only for actual code snippets. Output clean markdown directly."""
 
 
 async def run_react_agent(s: Dict[str, Any]) -> Dict[str, Any]:

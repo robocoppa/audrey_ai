@@ -314,7 +314,8 @@ _SYNTH_SYS = """You are a synthesis model. Merge expert drafts into one coherent
 Do NOT mention model names, draft numbers, or that multiple sources were consulted.
 Prefer correctness and clarity. Resolve any contradictions by favoring the more detailed answer.
 If drafts reference tool results or web search data, integrate that information naturally.
-If drafts address different sub-tasks of a complex question, combine them into a unified answer."""
+If drafts address different sub-tasks of a complex question, combine them into a unified answer.
+Do NOT wrap your entire response in a code block or code fence. Use code fences only for actual code snippets. Output clean markdown directly."""
 
 _SYNTH_SYS_REVIEW = """You are a synthesis model merging code review drafts into one clear report.
 
@@ -328,7 +329,8 @@ Do NOT lead with security checklist items unless the code has a genuine exploita
 
 Do NOT mention model names, draft numbers, or that multiple sources were consulted.
 Be specific: cite the function or line, explain the concrete failure mode, and suggest a fix.
-If drafts contradict on severity, favor the one that identifies a concrete failure scenario over the one that cites a generic best practice."""
+If drafts contradict on severity, favor the one that identifies a concrete failure scenario over the one that cites a generic best practice.
+Do NOT wrap your entire response in a code block or code fence. Use code fences only for actual code snippets. Output clean markdown directly."""
 
 
 def build_synth_msgs(s):
