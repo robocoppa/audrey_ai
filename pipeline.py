@@ -160,25 +160,76 @@ async def node_plan_panel(s):
         s["task_type"] = "general"
     panel = deep_panel_for_model(s["requested_model"])[tt]
 
-    # Cloud mode gets higher worker cap
-    if s["requested_model"] == "audrey_cloud":
-        max_workers = MAX_DEEP_WORKERS_CLOUD
-    else:
-        max_workers = MAX_DEEP_WORKERS
+    requested = s["requested_model"]
+    all_workers = panel["workers"]
 
-    ws = panel["workers"][:max_workers]
-    healthy = [
-        w
-        for w in ws
-        if is_model_healthy(w) and (w in state.available_models or is_cloud_model(w))
-    ]
-    ws = healthy or panel["workers"][:max_workers]
-    s["deep_workers"] = ws
+    # ── Worker selection with independent cloud/local caps ──
+    # Walk the full config list in order, filling cloud and local buckets
+    # independently.  Unhealthy or unavailable models are skipped and
+    # later candidates backfill their slot.
+    #
+    # audrey_cloud:  only cloud workers, capped by MAX_DEEP_WORKERS_CLOUD
+    # audrey_local:  only local workers, capped by MAX_DEEP_WORKERS
+    # audrey_deep:   both, each capped independently
+
+    if requested == "audrey_cloud":
+        max_cloud, max_local = MAX_DEEP_WORKERS_CLOUD, 0
+    elif requested == "audrey_local":
+        max_cloud, max_local = 0, MAX_DEEP_WORKERS
+    else:
+        # audrey_deep — mixed: independent caps
+        max_cloud, max_local = MAX_DEEP_WORKERS_CLOUD, MAX_DEEP_WORKERS
+
+    selected = []
+    cloud_count = 0
+    local_count = 0
+
+    for w in all_workers:
+        cloud = is_cloud_model(w)
+
+        # Check bucket capacity
+        if cloud and cloud_count >= max_cloud:
+            continue
+        if not cloud and local_count >= max_local:
+            continue
+
+        # Health + availability gate
+        if not is_model_healthy(w):
+            logger.debug("Worker %s skipped: unhealthy (cooldown)", w)
+            continue
+        if not cloud and w not in state.available_models:
+            logger.debug("Worker %s skipped: not in available_models", w)
+            continue
+
+        selected.append(w)
+        if cloud:
+            cloud_count += 1
+        else:
+            local_count += 1
+
+    # Last resort: if health filtering emptied the list entirely,
+    # fall back to the raw config list (capped) so we at least try.
+    if not selected:
+        logger.warning(
+            "All workers unhealthy for %s/%s — falling back to raw config",
+            requested, tt,
+        )
+        fallback_cap = max_cloud + max_local or MAX_DEEP_WORKERS
+        selected = all_workers[:fallback_cap]
+
+    s["deep_workers"] = selected
     s["synthesizer"] = panel["synthesizer"]
     s["fallback_synthesizer"] = panel.get("fallback_synthesizer", "")
 
     sub_tasks = await plan_sub_tasks(s["messages"], tt)
     s["sub_tasks"] = sub_tasks
+
+    logger.info(
+        "Panel plan: %s/%s → %d workers %s  synth=%s",
+        requested, tt, len(selected),
+        [w for w in selected],
+        s["synthesizer"],
+    )
     return s
 
 
