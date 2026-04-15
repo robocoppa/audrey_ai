@@ -262,7 +262,7 @@ timeouts:
   medium: 180
   large: 360
   cloud: 120
-  deep_worker: 240
+  deep_worker: 400
   fast_path: 180
 
 # ─── Cache ───
