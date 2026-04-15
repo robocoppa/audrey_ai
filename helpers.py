@@ -48,11 +48,16 @@ def ensure_state_defaults(state: dict[str, Any]) -> dict[str, Any]:
     state.setdefault("use_fast_path", False)
     state.setdefault("fast_model", "")
     state.setdefault("sub_tasks", None)
+    state.setdefault("worker_error_count", 0)
     state.setdefault("react_rounds", 0)
     state.setdefault("reflection_result", {})
     state.setdefault("reflection_retries", 0)
+    state.setdefault("force_strong_synth", False)
     state.setdefault("escalated", False)
     state.setdefault("tools_used", [])
+    state.setdefault("synthesis_candidates", [])
+    state.setdefault("synthesis_strategy", "configured_first")
+    state.setdefault("synthesis_escalation_reason", "")
     state.setdefault("is_code_review", False)
     state.setdefault("audrey_mode", "balanced")
     state.setdefault("timeline", [])
@@ -178,6 +183,10 @@ def build_trust_signals(state: dict[str, Any]) -> dict[str, Any]:
         "source_count": source_count,
         "reflection_quality": str(
             (state.get("reflection_result") or {}).get("quality", "n/a")
+        ),
+        "synthesis_strategy": str(state.get("synthesis_strategy", "")),
+        "synthesis_escalation_reason": str(
+            state.get("synthesis_escalation_reason", "")
         ),
         "escalated": bool(state.get("escalated", False)),
         "cache_hit": bool(state.get("cache_hit", False)),

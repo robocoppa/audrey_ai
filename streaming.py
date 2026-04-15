@@ -192,8 +192,16 @@ async def stream_synthesis(
 ) -> AsyncGenerator[str, None]:
     sid, ct = _resolve_sid_ct(ps, rid, created)
     mn = ps["requested_model"]
-    sy = ps["synthesizer"]
-    fb = ps.get("fallback_synthesizer", "")
+    synth_candidates = [
+        str(m).strip()
+        for m in ps.get("synthesis_candidates", [])
+        if str(m).strip()
+    ]
+    if not synth_candidates:
+        sy = str(ps.get("synthesizer", "")).strip()
+        fb = str(ps.get("fallback_synthesizer", "")).strip()
+        synth_candidates = [m for m in [sy, fb] if m]
+    current_synth = synth_candidates[0] if synth_candidates else "?"
     ws = ps.get("deep_workers", [])
     sub_tasks = ps.get("sub_tasks")
 
@@ -207,11 +215,11 @@ async def stream_synthesis(
                 yield _sc(sid, ct, mn, f"🌐 Web search used: {search_query}\n")
             else:
                 yield _sc(sid, ct, mn, "🌐 Web search used\n")
-        yield _sc(sid, ct, mn, f"✨ Synthesizing with {sy}...\n\n---\n\n")
+        yield _sc(sid, ct, mn, f"✨ Synthesizing with {current_synth}...\n\n---\n\n")
     if EMIT_ROUTING_BANNER:
         yield _sc(sid, ct, mn, banner(ps))
 
-    for synth in filter(None, [sy, fb]):
+    for i, synth in enumerate(synth_candidates):
         try:
             async for item in ollama_chat_stream(
                 synth,
@@ -223,12 +231,16 @@ async def stream_synthesis(
                     yield _sc(sid, ct, mn, c)
                 if item.get("done"):
                     note_model_success(synth)
+                    ps["selected_model"] = synth
                     yield _sc_stop(sid, ct, mn)
                     yield _SSE_DONE
                     return
         except Exception as e:
             logger.warning("Synthesis failed for %s: %s", synth, e)
             note_model_failure(synth)
+            if EMIT_STATUS_UPDATES and i < len(synth_candidates) - 1:
+                nxt = synth_candidates[i + 1]
+                yield _sc(sid, ct, mn, f"\n[Retrying synthesis with {nxt}]\n\n")
 
     yield _sc(sid, ct, mn, "[Error. Please try again.]")
     yield _sc_stop(sid, ct, mn)

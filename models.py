@@ -54,7 +54,11 @@ class AudreyState(TypedDict, total=False):
     latency_ms: int
     deep_workers: list[str]
     worker_outputs: list[dict[str, str]]
+    worker_error_count: int
     synthesizer: str
+    synthesis_candidates: list[str]
+    synthesis_strategy: str
+    synthesis_escalation_reason: str
     synthesis_messages: list[dict[str, Any]]
     prompt_tokens: int
     completion_tokens: int
@@ -69,6 +73,7 @@ class AudreyState(TypedDict, total=False):
     react_rounds: int
     reflection_result: dict[str, Any]
     reflection_retries: int
+    force_strong_synth: bool
     escalated: bool
     tools_used: list[dict[str, Any]]
     # UX metadata fields

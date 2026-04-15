@@ -7,6 +7,7 @@ plus the graph construction and compilation.
 
 import asyncio
 import logging
+import re
 import traceback
 from typing import Any
 
@@ -41,6 +42,7 @@ from models import AudreyState
 from ollama import run_model_once, run_model_with_tools_detailed
 
 logger = logging.getLogger("audrey.pipeline")
+_WORKER_ERROR_PREFIX = "[WORKER_ERROR]"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -329,7 +331,7 @@ async def node_parallel_generate(s):
             )
             return {
                 "model": wn,
-                "content": "[WORKER_ERROR] Unable to respond.",
+                "content": f"{_WORKER_ERROR_PREFIX} Unable to respond.",
                 "sub_task": sub_task or "",
                 "tools_used": [],
             }
@@ -340,9 +342,10 @@ async def node_parallel_generate(s):
         logger.error("node_parallel_generate called with empty workers list")
         s["worker_outputs"] = [{
             "model": "none",
-            "content": "[WORKER_ERROR] No workers available.",
+            "content": f"{_WORKER_ERROR_PREFIX} No workers available.",
             "sub_task": "",
         }]
+        s["worker_error_count"] = 1
         return s
 
     if sub_tasks and len(sub_tasks) >= 2:
@@ -379,7 +382,8 @@ async def node_parallel_generate(s):
     else:
         outs = []
 
-    valid = [o for o in outs if not o["content"].startswith("[WORKER_ERROR]")]
+    valid = [o for o in outs if not str(o.get("content", "")).startswith(_WORKER_ERROR_PREFIX)]
+    s["worker_error_count"] = len(outs) - len(valid)
     selected_outputs = valid or outs
     s["worker_outputs"] = selected_outputs
 
@@ -421,6 +425,174 @@ If drafts contradict on severity, favor the one that identifies a concrete failu
 Do NOT wrap your entire response in a code block or code fence. Use code fences only for actual code snippets. Output clean markdown directly."""
 
 
+_SYNTH_TOKEN_RE = re.compile(r"[a-z0-9]{4,}")
+_SYNTH_STOPWORDS = {
+    "about", "above", "after", "again", "against", "also", "among", "because",
+    "before", "being", "between", "could", "first", "from", "have", "into",
+    "just", "like", "more", "most", "only", "other", "over", "same", "some",
+    "than", "that", "their", "there", "these", "they", "this", "those", "very",
+    "what", "when", "where", "which", "while", "with", "would", "your",
+}
+_SYNTH_UNCERTAINTY_MARKERS = (
+    "not sure",
+    "uncertain",
+    "i don't know",
+    "cannot determine",
+    "can't determine",
+    "insufficient information",
+    "unable to verify",
+)
+
+
+def _is_valid_worker_output(output: dict[str, Any]) -> bool:
+    content = str(output.get("content", "") or "")
+    return bool(content.strip()) and not content.startswith(_WORKER_ERROR_PREFIX)
+
+
+def _local_worker_models_for_synth(s: dict[str, Any]) -> list[str]:
+    outputs = s.get("worker_outputs", [])
+    available = {
+        str(o.get("model", "")).strip()
+        for o in outputs
+        if _is_valid_worker_output(o) and not is_cloud_model(str(o.get("model", "")))
+    }
+    if not available:
+        return []
+
+    ordered: list[str] = []
+    # Prefer the most recently produced local draft first (more likely warm).
+    for output in reversed(outputs):
+        n = str(output.get("model", "")).strip()
+        if n and n in available and n not in ordered:
+            ordered.append(n)
+
+    for name in s.get("deep_workers", []):
+        n = str(name).strip()
+        if n and n in available and n not in ordered:
+            ordered.append(n)
+    return ordered
+
+
+def _draft_keywords(text: str) -> set[str]:
+    return {
+        token
+        for token in _SYNTH_TOKEN_RE.findall(text.lower())
+        if token not in _SYNTH_STOPWORDS
+    }
+
+
+def _has_draft_conflict(
+    worker_outputs: list[dict[str, Any]],
+    sub_tasks: list[str] | None,
+) -> bool:
+    # When planned sub-tasks exist, draft diversity is expected, not conflict.
+    if sub_tasks and len(sub_tasks) >= 2:
+        return False
+
+    keyword_sets: list[set[str]] = []
+    for output in worker_outputs:
+        text = str(output.get("content", "") or "")
+        if len(text) < 120:
+            continue
+        kws = _draft_keywords(text)
+        if len(kws) >= 6:
+            keyword_sets.append(kws)
+
+    if len(keyword_sets) < 2:
+        return False
+
+    min_overlap = 1.0
+    compared = 0
+    for i in range(len(keyword_sets)):
+        for j in range(i + 1, len(keyword_sets)):
+            union = keyword_sets[i] | keyword_sets[j]
+            if not union:
+                continue
+            compared += 1
+            overlap = len(keyword_sets[i] & keyword_sets[j]) / len(union)
+            if overlap < min_overlap:
+                min_overlap = overlap
+
+    return compared > 0 and min_overlap < 0.03
+
+
+def _has_uncertain_draft(worker_outputs: list[dict[str, Any]]) -> bool:
+    for output in worker_outputs:
+        text = str(output.get("content", "") or "").lower()
+        if any(marker in text for marker in _SYNTH_UNCERTAINTY_MARKERS):
+            return True
+    return False
+
+
+def _synthesis_escalation_reason(s: dict[str, Any]) -> str:
+    if s.get("force_strong_synth"):
+        return "forced_strong_synth"
+
+    confidence = float(s.get("confidence", 0.0) or 0.0)
+    if confidence < LOW_CONFIDENCE_THRESHOLD:
+        return f"low_confidence:{confidence:.2f}"
+
+    worker_error_count = int(s.get("worker_error_count", 0) or 0)
+    if worker_error_count > 0:
+        return f"worker_errors:{worker_error_count}"
+
+    worker_outputs = [
+        o for o in s.get("worker_outputs", [])
+        if _is_valid_worker_output(o)
+    ]
+    deep_worker_count = len(s.get("deep_workers", []))
+    if deep_worker_count > 1 and len(worker_outputs) <= 1:
+        return "single_valid_draft"
+
+    if _has_uncertain_draft(worker_outputs):
+        return "draft_uncertainty"
+
+    if _has_draft_conflict(worker_outputs, s.get("sub_tasks")):
+        return "draft_conflict"
+
+    return ""
+
+
+def resolve_synthesis_candidates(s: dict[str, Any]) -> list[str]:
+    primary = str(s.get("synthesizer", "")).strip()
+    fallback = str(s.get("fallback_synthesizer", "")).strip()
+    deep_workers = [str(w).strip() for w in s.get("deep_workers", []) if str(w).strip()]
+    warm_local_workers = _local_worker_models_for_synth(s)
+    all_workers_local = bool(deep_workers) and all(not is_cloud_model(w) for w in deep_workers)
+    escalation_reason = _synthesis_escalation_reason(s)
+
+    if warm_local_workers and all_workers_local and not escalation_reason:
+        ordered = [*warm_local_workers, primary, fallback]
+        strategy = "warm_worker_first"
+    elif escalation_reason:
+        ordered = [primary, *warm_local_workers, fallback]
+        strategy = "configured_first_escalated"
+    else:
+        ordered = [primary, fallback]
+        strategy = "configured_first"
+
+    candidates: list[str] = []
+    for name in ordered:
+        model_name = str(name or "").strip()
+        if model_name and model_name not in candidates:
+            candidates.append(model_name)
+
+    if not candidates:
+        raise RuntimeError("No synthesis candidates configured")
+
+    s["synthesis_candidates"] = candidates
+    s["synthesis_strategy"] = strategy
+    s["synthesis_escalation_reason"] = escalation_reason
+    s["synthesizer"] = candidates[0]
+    logger.info(
+        "Synthesis routing: strategy=%s reason=%s candidates=%s",
+        strategy,
+        escalation_reason or "none",
+        candidates,
+    )
+    return candidates
+
+
 def build_synth_msgs(s):
     outputs = s["worker_outputs"]
     is_review = s.get("is_code_review", False)
@@ -443,6 +615,7 @@ def build_synth_msgs(s):
 
 
 async def node_prepare_synthesis(s):
+    s["synthesis_candidates"] = resolve_synthesis_candidates(s)
     s["synthesis_messages"] = build_synth_msgs(s)
     return s
 
@@ -450,11 +623,8 @@ async def node_prepare_synthesis(s):
 async def node_synthesize(s):
     if "synthesis_messages" not in s:
         s["synthesis_messages"] = build_synth_msgs(s)
-    synths = [s["synthesizer"]]
-    fb = s.get("fallback_synthesizer", "")
-    if fb:
-        synths.append(fb)
-    for sy in synths:
+    synths = s.get("synthesis_candidates") or resolve_synthesis_candidates(s)
+    for i, sy in enumerate(synths):
         try:
             r = await run_model_once(
                 sy,
@@ -469,7 +639,7 @@ async def node_synthesize(s):
             return s
         except Exception as e:
             note_model_failure(sy)
-            if sy == synths[-1]:
+            if i == len(synths) - 1:
                 raise RuntimeError(f"Synthesizers failed: {e}")
     raise RuntimeError("No synthesizers")
 
@@ -505,6 +675,18 @@ async def node_reflect_deep(s):
                 ),
             }
         )
+        previous = str(s.get("selected_model", "")).strip()
+        s["force_strong_synth"] = True
+        candidates = resolve_synthesis_candidates(s)
+        if previous and previous in candidates and len(candidates) > 1:
+            reordered = [m for m in candidates if m != previous]
+            reordered.append(previous)
+            s["synthesis_candidates"] = reordered
+            s["synthesizer"] = reordered[0]
+            logger.info(
+                "Deep reflection retry: deprioritized previous synthesizer %s",
+                previous,
+            )
         return await node_synthesize(s)
 
     return s
