@@ -8,6 +8,7 @@ and adaptive escalation from fast path to deep panel.
 import asyncio
 import json
 import logging
+from datetime import datetime
 from typing import Any
 
 import state
@@ -202,6 +203,14 @@ For each request:
 If web search results are already provided in context, use them directly rather than
 searching again unless you need additional information.
 
+Date handling rules:
+- Always resolve relative dates (today, tomorrow, yesterday, this year, next year, last year)
+  against the current date in system context before using tools.
+- When making tool/web search queries for relative-date questions, include absolute
+  dates/years (for example, "next year" -> a concrete year).
+- If the user asks about time-sensitive facts, prefer fresh tool/web evidence and
+  state the resolved absolute date/year in the answer.
+
 Be thorough but efficient — use tools only when they add value.
 Do NOT wrap your entire response in a code block or code fence. Use code fences only for actual code snippets. Output clean markdown directly."""
 
@@ -223,10 +232,23 @@ async def run_react_agent(s: dict[str, Any]) -> dict[str, Any]:
 
     model = s["fast_model"]
     task_prompt = role_prompt(s["task_type"], model, is_code_review=s.get("is_code_review", False))
+    user_text = get_last_user_text(s["messages"]).lower()
+    current_year = datetime.now().year
+    date_hints: list[str] = []
+    if "next year" in user_text:
+        date_hints.append(f"'next year' means {current_year + 1}")
+    if "this year" in user_text:
+        date_hints.append(f"'this year' means {current_year}")
+    if "last year" in user_text:
+        date_hints.append(f"'last year' means {current_year - 1}")
+
+    date_hint_text = ""
+    if date_hints:
+        date_hint_text = "\n\nRelative-date resolution for this request: " + "; ".join(date_hints) + "."
 
     sys_msg = {
         "role": "system",
-        "content": f"{_REACT_SYSTEM}\n\nFocus: {task_prompt}",
+        "content": f"{_REACT_SYSTEM}\n\nFocus: {task_prompt}{date_hint_text}",
     }
     msgs = [sys_msg, *s["messages"]]
 

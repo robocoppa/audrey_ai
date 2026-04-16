@@ -322,13 +322,17 @@ def get_last_user_text(msgs: list[dict[str, Any]]) -> str:
 def _datetime_system_message() -> dict[str, str]:
     now = datetime.now()
     utcnow = datetime.now(timezone.utc)
+    current_year = now.year
     return {
         "role": "system",
         "content": (
             f"Current date and time: {now.strftime('%A, %B %d, %Y at %I:%M %p')} "
             f"(local server time). UTC: {utcnow.strftime('%A, %B %d, %Y at %H:%M UTC')}. "
             f"Use this for any questions involving relative dates like 'today', 'yesterday', "
-            f"'this week', 'last month', etc."
+            f"'this week', 'last month', etc. "
+            f"Relative-year mapping: this year={current_year}, next year={current_year + 1}, "
+            f"last year={current_year - 1}. Resolve relative dates to absolute dates/years "
+            f"before answering or searching."
         ),
     }
 

@@ -498,9 +498,17 @@ def should_force_deep(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def select_fast_model(task_type: str) -> str | None:
-    """Pick the highest-priority healthy model for a task type."""
+    """Pick the fastest healthy model for a task type, then priority/quality."""
     candidates = MODEL_REGISTRY.get(task_type, MODEL_REGISTRY.get("general", []))
-    for entry in sorted(candidates, key=lambda e: e.get("priority", 0), reverse=True):
+
+    def _sort_key(entry: dict[str, Any]) -> tuple[float, float, float]:
+        # Fast path should prefer low-latency models first.
+        speed = float(entry.get("speed", 0) or 0)
+        priority = float(entry.get("priority", 0) or 0)
+        quality = float(entry.get("quality", 0) or 0)
+        return (speed, priority, quality)
+
+    for entry in sorted(candidates, key=_sort_key, reverse=True):
         name = entry["name"]
         if is_model_healthy(name) and (
             name in state.available_models or is_cloud_model(name)
