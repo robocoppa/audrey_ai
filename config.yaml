@@ -186,8 +186,8 @@ deep_panel_cloud:
 deep_panel_local:
   code:
     workers:
-      - "deepseek-r1:32b"
       - "qwen3-coder-next:latest"
+      - "deepseek-r1:32b"
     synthesizer: "qwen3-coder-next:latest"
     fallback_synthesizer: "deepseek-r1:32b"
 
