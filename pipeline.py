@@ -1,8 +1,8 @@
 """
-Audrey — LangGraph pipeline nodes and graph builders.
+Audrey — pipeline nodes.
 
-Contains every node function for the fast-path and deep-panel graphs,
-plus the graph construction and compilation.
+Contains every node function for the fast-path and deep-panel flows,
+worker selection, synthesis routing, and reflection.
 """
 
 import asyncio
@@ -10,8 +10,6 @@ import logging
 import re
 import traceback
 from typing import Any
-
-from langgraph.graph import END, StateGraph
 
 import state
 from agents import adaptive_escalate, plan_sub_tasks, reflect_on_response, run_react_agent
@@ -38,7 +36,6 @@ from helpers import (
     model_call_kwargs,
     role_prompt,
 )
-from models import AudreyState
 from ollama import run_model_once, run_model_with_tools_detailed
 
 logger = logging.getLogger("audrey.pipeline")
@@ -394,26 +391,22 @@ async def node_parallel_generate(s):
     cloud_tasks = [(w, t) for w, t in assignments if is_cloud_model(w)]
     local_tasks = [(w, t) for w, t in assignments if not is_cloud_model(w)]
 
-    async def run_local(sequential: bool = False):
-        if not local_tasks:
-            return []
-        if sequential:
-            results = []
-            for w, t in local_tasks:
-                results.append(await one(w, t))
-            return results
-        return list(await asyncio.gather(*[one(w, t) for w, t in local_tasks]))
+    async def run_local_sequential():
+        results = []
+        for w, t in local_tasks:
+            results.append(await one(w, t))
+        return results
 
     if cloud_tasks and local_tasks:
         cr, lr = await asyncio.gather(
             asyncio.gather(*[one(w, t) for w, t in cloud_tasks]),
-            run_local(sequential=True),
+            run_local_sequential(),
         )
         outs = list(cr) + lr
     elif cloud_tasks:
         outs = list(await asyncio.gather(*[one(w, t) for w, t in cloud_tasks]))
     elif local_tasks:
-        outs = await run_local(sequential=True)
+        outs = await run_local_sequential()
     else:
         outs = []
 
@@ -766,72 +759,3 @@ async def node_reflect_deep(s):
     return s
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Graph builders
-# ══════════════════════════════════════════════════════════════════════════════
-
-def build_deep_graph(include_synthesis: bool = True):
-    """Build the deep-panel pipeline graph with reflection.
-
-    Search is handled by tool-calling during worker generation, not as
-    a separate pipeline node.
-    """
-    g = StateGraph(AudreyState)
-    for n, f in [
-        ("classify", node_classify),
-        ("plan", node_plan_panel),
-        ("parallel", node_parallel_generate),
-        ("prep", node_prepare_synthesis),
-    ]:
-        g.add_node(n, f)
-    g.set_entry_point("classify")
-    g.add_edge("classify", "plan")
-    g.add_edge("plan", "parallel")
-    g.add_edge("parallel", "prep")
-    if include_synthesis:
-        g.add_node("synth", node_synthesize)
-        g.add_node("reflect_deep", node_reflect_deep)
-        g.add_edge("prep", "synth")
-        g.add_edge("synth", "reflect_deep")
-        g.add_edge("reflect_deep", END)
-    else:
-        g.add_edge("prep", END)
-    return g.compile()
-
-
-def _should_run_react(s) -> str:
-    """Conditional edge: run ReAct agent only when fast path is active."""
-    if s.get("use_fast_path") and s.get("fast_model"):
-        return "react_agent"
-    return "escalate"
-
-
-def build_fast_graph():
-    """Build the fast path with ReAct agent + adaptive escalation.
-
-    Uses a conditional edge after classify so that react_agent is
-    only invoked when classify actually selected a fast model.
-    Search is handled by tool-calling inside the ReAct agent.
-    """
-    g = StateGraph(AudreyState)
-    for n, f in [
-        ("classify", node_classify),
-        ("react_agent", node_react_agent),
-        ("escalate", node_adaptive_escalate),
-    ]:
-        g.add_node(n, f)
-    g.set_entry_point("classify")
-    g.add_conditional_edges(
-        "classify",
-        _should_run_react,
-        {"react_agent": "react_agent", "escalate": "escalate"},
-    )
-    g.add_edge("react_agent", "escalate")
-    g.add_edge("escalate", END)
-    return g.compile()
-
-
-# Pre-compiled graphs (imported by main.py)
-SYNTH_GRAPH = build_deep_graph(True)
-PREP_GRAPH = build_deep_graph(False)
-FAST_GRAPH = build_fast_graph()

@@ -1,5 +1,5 @@
 """
-Audrey — LangGraph Auto-Router
+Audrey — Auto-Router
 
 FastAPI application, lifespan, endpoints, and request dispatch.
 All logic lives in dedicated modules; this file wires them together.
@@ -46,22 +46,24 @@ from config import (
     TOOLS_ENABLED,
     is_cloud_model,
 )
-from helpers import estimate_tokens, flatten_messages
 from helpers import (
     append_timeline_event,
     build_initial_state,
     build_trust_signals,
+    estimate_tokens,
+    flatten_messages,
     get_last_user_text,
     is_time_sensitive_query,
     normalize_audrey_mode,
 )
 from models import ChatCompletionRequest
 from pipeline import (
-    FAST_GRAPH,
+    node_adaptive_escalate,
     node_classify,
     node_parallel_generate,
     node_plan_panel,
     node_prepare_synthesis,
+    node_react_agent,
     node_reflect_deep,
     node_synthesize,
 )
@@ -134,21 +136,82 @@ def _timeline(
     )
 
 
-async def _run_deep_sequence(
-    state_obj: dict[str, Any],
+async def _orchestrate(
+    s: dict[str, Any],
     *,
-    include_synthesis: bool,
-) -> dict[str, Any]:
-    s = state_obj
-    if not s.get("task_type"):
-        s = await node_classify(s)
+    req_model: str,
+    include_synthesis: bool = True,
+) -> AsyncGenerator[tuple[str, dict[str, Any], dict[str, Any]], None]:
+    """Shared pipeline orchestration.
+
+    Yields ``(stage, state, hints)`` before and after each step.
+    ``stage`` is ``"starting:<name>"`` or ``"done:<name>"``.
+    ``hints`` carries per-stage metadata for UX (heartbeat style, etc.).
+
+    Consumers:
+      - ``run_graph_dispatch`` ignores ``starting:`` yields.
+      - ``_stream()`` emits SSE status/heartbeat between stages.
+    """
+
+    # ── Classify (runs exactly once) ────────────────────────────────────
+    yield ("starting:classify", s, {})
+    s = await node_classify(s)
+    _timeline(
+        s,
+        stage="classify",
+        message="Request classified",
+        details={
+            "task_type": s.get("task_type"),
+            "confidence": s.get("confidence"),
+            "use_fast_path": bool(s.get("use_fast_path")),
+        },
+    )
+    yield ("done:classify", s, {})
+
+    # ── Fast path (audrey_deep auto + audrey_fast) ──────────────────────
+    fast_eligible = (
+        FAST_PATH_ENABLED
+        and req_model in {"audrey_deep", "audrey_fast"}
+    )
+    if fast_eligible and s.get("use_fast_path") and s.get("fast_model"):
+        yield ("starting:fast_react", s, {})
+        s = await node_react_agent(s)
+        s = await node_adaptive_escalate(s)
         _timeline(
             s,
-            stage="classify",
-            message="Request classified for deep-panel route",
-            details={"task_type": s.get("task_type"), "confidence": s.get("confidence")},
+            stage="fast_react",
+            message="Fast path completed",
+            details={
+                "selected_model": s.get("selected_model", s.get("fast_model", "")),
+                "escalated": bool(s.get("escalated")),
+            },
         )
+        yield ("done:fast_react", s, {})
 
+        if s.get("use_fast_path") and s.get("result_text") and not s.get("escalated"):
+            yield ("done:complete_fast", s, {})
+            return
+
+        if req_model == "audrey_fast":
+            yield ("done:fast_only_fallback", s, {})
+            return
+
+        if s.get("escalated"):
+            _timeline(
+                s,
+                stage="escalation",
+                message="Escalated from fast path to deep panel",
+                status="warning",
+                details={"reason": s.get("route_reason", "")},
+            )
+            yield ("done:escalation", s, {})
+
+    elif req_model == "audrey_fast":
+        yield ("done:fast_only_fallback", s, {})
+        return
+
+    # ── Deep panel ──────────────────────────────────────────────────────
+    yield ("starting:plan", s, {})
     s = await node_plan_panel(s)
     _timeline(
         s,
@@ -159,7 +222,9 @@ async def _run_deep_sequence(
             "planned_sub_tasks": len(s.get("sub_tasks") or []),
         },
     )
+    yield ("done:plan", s, {})
 
+    yield ("starting:generate", s, {"heartbeat_style": "dots"})
     s = await node_parallel_generate(s)
     _timeline(
         s,
@@ -167,15 +232,15 @@ async def _run_deep_sequence(
         message="Worker drafts generated",
         details={"outputs": len(s.get("worker_outputs", []))},
     )
+    yield ("done:generate", s, {})
 
+    yield ("starting:prepare_synthesis", s, {})
     s = await node_prepare_synthesis(s)
-    _timeline(
-        s,
-        stage="prepare_synthesis",
-        message="Synthesis context prepared",
-    )
+    _timeline(s, stage="prepare_synthesis", message="Synthesis context prepared")
+    yield ("done:prepare_synthesis", s, {})
 
     if include_synthesis:
+        yield ("starting:synthesize", s, {})
         s = await node_synthesize(s)
         _timeline(
             s,
@@ -183,6 +248,8 @@ async def _run_deep_sequence(
             message="Drafts synthesized into final answer",
             details={"selected_model": s.get("selected_model", s.get("synthesizer", ""))},
         )
+        yield ("done:synthesize", s, {})
+
         s = await node_reflect_deep(s)
         rr = s.get("reflection_result", {})
         if rr:
@@ -192,7 +259,7 @@ async def _run_deep_sequence(
                 message="Final answer evaluated by reflection gate",
                 details={"quality": rr.get("quality", "n/a")},
             )
-    return s
+        yield ("done:reflect", s, {})
 
 
 async def _await_stream_stage(
@@ -518,7 +585,8 @@ async def rediscover_tools():
 #  Request dispatch
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def run_graph_dispatch(req, *, stream_prepare_only=False):
+def _build_request_state(req, *, request_id: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build initial state and cache kwargs from a request. Shared by both paths."""
     msgs_raw = [m.model_dump() for m in req.messages]
     temp = req.temperature if req.temperature is not None else DEFAULT_TEMPERATURE
     mode = normalize_audrey_mode(getattr(req, "audrey_mode", "balanced"))
@@ -529,9 +597,8 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
         frequency_penalty=req.frequency_penalty,
         presence_penalty=req.presence_penalty,
     )
-
     s = build_initial_state(
-        request_id=str(uuid.uuid4()),
+        request_id=request_id or str(uuid.uuid4()),
         requested_model=req.model,
         messages=msgs_raw,
         audrey_mode=mode,
@@ -545,256 +612,122 @@ async def run_graph_dispatch(req, *, stream_prepare_only=False):
     )
     _apply_mode_overrides(s)
     s["needs_fresh_data"] = is_time_sensitive_query(get_last_user_text(msgs_raw))
-    _timeline(
-        s,
-        stage="request_received",
-        message="Request accepted",
-        details={"mode": s["audrey_mode"], "stream": bool(req.stream)},
-    )
+    return s, cache_kwargs
 
-    # Cache check (skipped for time-sensitive requests to avoid stale responses).
-    cache_allowed = (
-        CACHE_ENABLED
-        and not req.stream
-        and not stream_prepare_only
-        and not s["needs_fresh_data"]
+
+def _finalize_fast_only(s: dict[str, Any]) -> dict[str, Any]:
+    """Populate fields for an audrey_fast fallback response."""
+    s["selected_model"] = s.get("selected_model", s.get("fast_model", "none"))
+    s["result_text"] = s.get("result_text") or _FAST_ONLY_FALLBACK_TEXT
+    s.setdefault("prompt_tokens", estimate_tokens(flatten_messages(s["messages"])))
+    s["completion_tokens"] = estimate_tokens(s["result_text"])
+    s["escalated"] = False
+    state.update_audrey_fast_health(
+        selected_model=s.get("selected_model", "none"),
+        success=False,
+        reason=s.get("route_reason", "fast_only:fallback"),
     )
-    if cache_allowed:
+    _timeline(s, stage="complete", message="Fast-only fallback", status="warning")
+    return s
+
+
+def _log_completion(r: dict[str, Any], *, path: str) -> None:
+    log_entry: dict[str, Any] = {
+        "rid": r.get("request_id"),
+        "model": r.get("requested_model"),
+        "type": r.get("task_type"),
+        "conf": r.get("confidence"),
+        "selected": r.get("selected_model", r.get("synthesizer")),
+        "path": path,
+        "ms": r.get("latency_ms"),
+    }
+    if path in ("fast+react", "fast-only"):
+        log_entry["react_rounds"] = r.get("react_rounds", 0)
+        log_entry["search"] = r.get("search_performed", False)
+        log_entry["search_query"] = _log_safe_query(r.get("search_query", ""))
+        log_entry["tools"] = [t.get("tool", "") for t in r.get("tools_used", [])]
+    else:
+        log_entry["planned"] = bool(r.get("sub_tasks"))
+        log_entry["reflection"] = (r.get("reflection_result") or {}).get("quality", "n/a")
+        log_entry["search"] = r.get("search_performed", False)
+        log_entry["search_query"] = _log_safe_query(r.get("search_query", ""))
+        log_entry["tools"] = [t.get("tool", "") for t in r.get("tools_used", [])]
+        log_entry["escalated"] = r.get("escalated", False)
+        log_entry["mode"] = r.get("audrey_mode")
+    logger.info(json.dumps(log_entry))
+
+
+async def run_graph_dispatch(req) -> dict[str, Any]:
+    s, cache_kwargs = _build_request_state(req)
+    msgs_raw = s["messages"]
+    temp = s["temperature"]
+    _timeline(s, stage="request_received", message="Request accepted",
+              details={"mode": s["audrey_mode"], "stream": False})
+
+    if CACHE_ENABLED and not s["needs_fresh_data"]:
         cached = cache.get(msgs_raw, req.model, temp, **cache_kwargs)
         if cached is not None:
             logger.info("Cache hit for model=%s", req.model)
-            s.update(
-                {
-                    "result_text": cached,
-                    "selected_model": "cache",
-                    "task_type": "cached",
-                    "confidence": 1.0,
-                    "route_reason": "Cache hit",
-                    "latency_ms": 0,
-                    "prompt_tokens": estimate_tokens(flatten_messages(msgs_raw)),
-                    "completion_tokens": estimate_tokens(cached),
-                    "search_performed": False,
-                    "use_fast_path": False,
-                    "escalated": False,
-                    "cache_hit": True,
-                }
-            )
-            _timeline(
-                s,
-                stage="cache",
-                message="Response served from cache",
-                status="success",
-            )
+            s.update({
+                "result_text": cached, "selected_model": "cache",
+                "task_type": "cached", "confidence": 1.0,
+                "route_reason": "Cache hit", "latency_ms": 0,
+                "prompt_tokens": estimate_tokens(flatten_messages(msgs_raw)),
+                "completion_tokens": estimate_tokens(cached),
+                "search_performed": False, "use_fast_path": False,
+                "escalated": False, "cache_hit": True,
+            })
+            _timeline(s, stage="cache", message="Response served from cache", status="success")
             return s
-    elif CACHE_ENABLED and not req.stream and s["needs_fresh_data"]:
-        _timeline(
-            s,
-            stage="cache",
-            message="Cache bypassed for freshness-sensitive query",
-            details={"reason": "time_sensitive_query"},
-        )
+    elif CACHE_ENABLED and s["needs_fresh_data"]:
+        _timeline(s, stage="cache", message="Cache bypassed for freshness-sensitive query",
+                  details={"reason": "time_sensitive_query"})
 
-    # Try fast path for audrey_deep (auto) and audrey_fast (fast-only).
-    if (
-        FAST_PATH_ENABLED
-        and req.model in {"audrey_deep", "audrey_fast"}
-        and not stream_prepare_only
-    ):
-        _timeline(
-            s,
-            stage="fast_path",
-            message="Evaluating fast path",
-            details={"mode": s["audrey_mode"]},
-        )
-        r = await FAST_GRAPH.ainvoke(s)
-        r.setdefault("timeline", s.get("timeline", []))
-        r["audrey_mode"] = s["audrey_mode"]
-        r["needs_fresh_data"] = s["needs_fresh_data"]
+    last_stage = ""
+    async for stage_name, st, _hints in _orchestrate(s, req_model=req.model):
+        s = st
+        last_stage = stage_name
 
-        if r.get("use_fast_path") and r.get("result_text") and not r.get("escalated"):
-            r["latency_ms"] = int((time.time() - s["started_at"]) * 1000)
-            if CACHE_ENABLED and not r.get("needs_fresh_data", False):
-                cache.put(msgs_raw, req.model, temp, r["result_text"], **cache_kwargs)
-            if req.model == "audrey_fast":
-                state.update_audrey_fast_health(
-                    selected_model=r.get("selected_model", r.get("fast_model", "none")),
-                    success=True,
-                    reason=r.get("route_reason", "fast_only:completed"),
-                )
-            logger.info(
-                json.dumps(
-                    {
-                        "rid": r["request_id"],
-                        "model": r["requested_model"],
-                        "type": r.get("task_type"),
-                        "conf": r.get("confidence"),
-                        "selected": r.get("selected_model"),
-                        "path": (
-                            "fast-only"
-                            if req.model == "audrey_fast"
-                            else "fast+react"
-                        ),
-                        "react_rounds": r.get("react_rounds", 0),
-                        "reflection": r.get("reflection_result", {}).get(
-                            "quality", "n/a"
-                        ),
-                        "search": r.get("search_performed", False),
-                        "search_query": _log_safe_query(
-                            r.get("search_query", "")
-                        ),
-                        "tools": [
-                            t.get("tool", "") for t in r.get("tools_used", [])
-                        ],
-                        "ms": r["latency_ms"],
-                    }
-                )
-            )
-            _timeline(
-                r,
-                stage="complete",
-                message="Completed on fast path",
-                status="success",
-                details={"selected_model": r.get("selected_model", r.get("fast_model", ""))},
-            )
-            return r
+    s["latency_ms"] = int((time.time() - s["started_at"]) * 1000)
 
+    if last_stage == "done:complete_fast":
+        if CACHE_ENABLED and not s.get("needs_fresh_data", False) and s.get("result_text"):
+            cache.put(msgs_raw, req.model, temp, s["result_text"], **cache_kwargs)
         if req.model == "audrey_fast":
-            r["latency_ms"] = int((time.time() - s["started_at"]) * 1000)
-            r["selected_model"] = r.get("selected_model", r.get("fast_model", "none"))
-            r["result_text"] = r.get("result_text") or _FAST_ONLY_FALLBACK_TEXT
-            r["prompt_tokens"] = r.get(
-                "prompt_tokens", estimate_tokens(flatten_messages(msgs_raw))
-            )
-            r["completion_tokens"] = estimate_tokens(r["result_text"])
-            r["escalated"] = False
             state.update_audrey_fast_health(
-                selected_model=r.get("selected_model", "none"),
-                success=False,
-                reason=r.get("route_reason", "fast_only:fallback"),
+                selected_model=s.get("selected_model", s.get("fast_model", "none")),
+                success=True, reason=s.get("route_reason", "fast_only:completed"),
             )
-            logger.info(
-                json.dumps(
-                    {
-                        "rid": r["request_id"],
-                        "model": r["requested_model"],
-                        "type": r.get("task_type"),
-                        "conf": r.get("confidence"),
-                        "selected": r.get("selected_model"),
-                        "path": "fast-only",
-                        "fallback": True,
-                        "reason": r.get("route_reason", ""),
-                        "ms": r["latency_ms"],
-                    }
-                )
-            )
-            _timeline(
-                r,
-                stage="complete",
-                message="Fast-only request fell back to user-visible failure message",
-                status="warning",
-            )
-            return r
+        _timeline(s, stage="complete", message="Completed on fast path", status="success",
+                  details={"selected_model": s.get("selected_model", s.get("fast_model", ""))})
+        _log_completion(s, path="fast-only" if req.model == "audrey_fast" else "fast+react")
+        return s
 
-        # Fast path was skipped, failed, or escalated — fall through to deep panel
-        s = {**r, "started_at": time.time()}
-        s.setdefault("timeline", r.get("timeline", []))
-        if s.get("escalated"):
-            logger.info(
-                "Escalated from fast→deep: %s", s.get("route_reason", "")
-            )
-            _timeline(
-                s,
-                stage="escalation",
-                message="Escalated from fast path to deep panel",
-                status="warning",
-                details={"reason": s.get("route_reason", "")},
-            )
+    if last_stage == "done:fast_only_fallback":
+        _finalize_fast_only(s)
+        _log_completion(s, path="fast-only")
+        return s
 
-    # audrey_fast is fast-only and must never run the deep panel.
-    if req.model == "audrey_fast":
-        elapsed_ms = int((time.time() - s["started_at"]) * 1000)
-        state.update_audrey_fast_health(
-            selected_model="none",
-            success=False,
-            reason="fast_only:disabled_or_unavailable",
-        )
-        logger.info(
-            "audrey_fast fast-only fallback (fast_path_enabled=%s, prepare_only=%s)",
-            FAST_PATH_ENABLED,
-            stream_prepare_only,
-        )
-        _timeline(
-            s,
-            stage="complete",
-            message="Fast-only request returned fallback message",
-            status="warning",
-        )
-        return {
-            "request_id": s["request_id"],
-            "requested_model": req.model,
-            "result_text": _FAST_ONLY_FALLBACK_TEXT,
-            "selected_model": "none",
-            "task_type": s.get("task_type", "general"),
-            "confidence": s.get("confidence", 0.0),
-            "route_reason": "fast_only:disabled_or_unavailable",
-            "latency_ms": elapsed_ms,
-            "prompt_tokens": estimate_tokens(flatten_messages(msgs_raw)),
-            "completion_tokens": estimate_tokens(_FAST_ONLY_FALLBACK_TEXT),
-            "search_performed": False,
-            "use_fast_path": False,
-            "escalated": False,
-            "cache_hit": False,
-            "audrey_mode": s.get("audrey_mode", mode),
-            "needs_fresh_data": s.get("needs_fresh_data", False),
-            "timeline": s.get("timeline", []),
-        }
+    # Deep panel completed
+    if CACHE_ENABLED and s.get("result_text") and not s.get("needs_fresh_data", False):
+        cache.put(msgs_raw, req.model, temp, s["result_text"], **cache_kwargs)
+    s["cache_hit"] = bool(s.get("cache_hit", False))
+    _timeline(s, stage="complete", message="Completed on deep panel", status="success",
+              details={"selected_model": s.get("selected_model", s.get("synthesizer", ""))})
+    _log_completion(s, path="deep")
+    return s
 
-    # Deep panel path (single classify pass, even after fast->deep escalation).
-    _timeline(
-        s,
-        stage="deep_path",
-        message="Running deep-panel pipeline",
-    )
-    r = await _run_deep_sequence(s, include_synthesis=not stream_prepare_only)
-    r["latency_ms"] = int((time.time() - s["started_at"]) * 1000)
 
-    if (
-        CACHE_ENABLED
-        and not stream_prepare_only
-        and r.get("result_text")
-        and not r.get("needs_fresh_data", False)
-    ):
-        cache.put(msgs_raw, req.model, temp, r["result_text"], **cache_kwargs)
-    r["cache_hit"] = bool(r.get("cache_hit", False))
-    _timeline(
-        r,
-        stage="complete",
-        message="Completed on deep panel",
-        status="success",
-        details={"selected_model": r.get("selected_model", r.get("synthesizer", ""))},
-    )
+# ── SSE stage-to-UX mapping ──────────────────────────────────────────────────
 
-    logger.info(
-        json.dumps(
-            {
-                "rid": r["request_id"],
-                "model": r["requested_model"],
-                "type": r.get("task_type"),
-                "conf": r.get("confidence"),
-                "selected": r.get("selected_model", r.get("synthesizer")),
-                "path": "deep",
-                "planned": bool(r.get("sub_tasks")),
-                "reflection": r.get("reflection_result", {}).get("quality", "n/a"),
-                "search": r.get("search_performed", False),
-                "search_query": _log_safe_query(r.get("search_query", "")),
-                "tools": [t.get("tool", "") for t in r.get("tools_used", [])],
-                "escalated": r.get("escalated", False),
-                "mode": r.get("audrey_mode", mode),
-                "ms": r["latency_ms"],
-            }
-        )
-    )
-    return r
+_STAGE_STATUS: dict[str, tuple[str, str, str]] = {
+    "starting:classify":           ("🧭 Routing request...\n", "classify", "line"),
+    "starting:fast_react":         ("", "fast_react", "line"),
+    "starting:plan":               ("📋 Planning approach...\n", "plan", "line"),
+    "starting:generate":           ("🧠 Generating worker drafts", "parallel_generate", "dots"),
+    "starting:prepare_synthesis":  ("🧩 Preparing synthesis...\n", "prepare_synthesis", "line"),
+    "starting:synthesize":         ("", "synthesize", "line"),
+}
 
 
 # ── Main endpoint ────────────────────────────────────────────────────────────
@@ -824,479 +757,199 @@ async def chat_completions(req: ChatCompletionRequest):
     if req.stream:
 
         async def _stream():
-            ct = int(time.time())
             request_id = str(uuid.uuid4())
+            ct = int(time.time())
             rid = f"chatcmpl-{request_id.replace('-', '')[:24]}"
-            logger.info(
-                "Streaming request started rid=%s model=%s messages=%d",
-                request_id,
-                req.model,
-                len(req.messages),
-            )
+            mn = req.model
+            logger.info("Streaming request started rid=%s model=%s messages=%d",
+                        request_id, mn, len(req.messages))
+
+            def _evt(st, *, stage, message, status="info", details=None):
+                event = _timeline(st, stage=stage, message=message, status=status, details=details)
+                if EMIT_TIMELINE_EVENTS:
+                    return _sc_event(rid, ct, mn, event)
+                return None
+
             try:
                 if EMIT_STATUS_UPDATES:
-                    yield _sc(rid, ct, req.model, "🔍 Analyzing...\n")
+                    yield _sc(rid, ct, mn, "🔍 Analyzing...\n")
 
-                init_state = build_initial_state(
-                    request_id=request_id,
-                    requested_model=req.model,
-                    messages=[m.model_dump() for m in req.messages],
-                    audrey_mode=normalize_audrey_mode(req.audrey_mode),
-                    stream=True,
-                    temperature=(
-                        req.temperature
-                        if req.temperature is not None
-                        else DEFAULT_TEMPERATURE
-                    ),
-                    max_tokens=req.max_tokens,
-                    top_p=req.top_p,
-                    stop=req.stop,
-                    frequency_penalty=req.frequency_penalty,
-                    presence_penalty=req.presence_penalty,
-                )
-                init_state = _apply_mode_overrides(init_state)
-                init_state["needs_fresh_data"] = is_time_sensitive_query(
-                    get_last_user_text(init_state["messages"])
-                )
-                start_evt = _timeline(
-                    init_state,
-                    stage="request_received",
-                    message="Streaming request accepted",
-                    details={"mode": init_state.get("audrey_mode", "balanced")},
-                )
-                if EMIT_TIMELINE_EVENTS:
-                    yield _sc_event(rid, ct, req.model, start_evt)
+                init_state, _ = _build_request_state(req, request_id=request_id)
+                start_evt = _evt(init_state, stage="request_received",
+                                 message="Streaming request accepted",
+                                 details={"mode": init_state.get("audrey_mode", "balanced")})
+                if start_evt:
+                    yield start_evt
 
-                def _emit_timeline_event(
-                    state_obj: dict[str, Any],
-                    *,
-                    stage: str,
-                    message: str,
-                    status: str = "info",
-                    details: dict[str, Any] | None = None,
-                ) -> str | None:
-                    event = _timeline(
-                        state_obj,
-                        stage=stage,
-                        message=message,
-                        status=status,
-                        details=details,
-                    )
-                    if EMIT_TIMELINE_EVENTS:
-                        return _sc_event(rid, ct, req.model, event)
-                    return None
+                orch = _orchestrate(init_state, req_model=mn, include_synthesis=False)
+                s = init_state
+                last_stage = ""
+                pending_heartbeat: tuple[str, str, str] | None = None
 
-                # Classify (also initializes search fields and original_messages)
-                if EMIT_STATUS_UPDATES:
-                    yield _sc(rid, ct, req.model, "🧭 Routing request...\n")
+                async def _next_stage():
+                    return await orch.__anext__()
 
-                classified = None
-                async for chunk, result in _await_stream_stage(
-                    node_classify(init_state),
-                    rid=rid,
-                    created=ct,
-                    model_name=req.model,
-                    request_id=request_id,
-                    stage="classify",
-                    heartbeat_text="Still analyzing request",
-                ):
-                    if chunk is not None:
-                        yield chunk
-                    else:
-                        classified = result
-
-                if classified is None:
-                    raise RuntimeError("Classification stage completed without a result")
-                classification_evt = _emit_timeline_event(
-                    classified,
-                    stage="classify",
-                    message="Request classified",
-                    details={
-                        "task_type": classified.get("task_type"),
-                        "confidence": classified.get("confidence"),
-                        "use_fast_path": bool(classified.get("use_fast_path")),
-                    },
-                )
-                if classification_evt:
-                    yield classification_evt
-
-                logger.info(
-                    "Streaming route decided rid=%s path=%s task_type=%s conf=%.2f fast_model=%s",
-                    request_id,
-                    (
-                        "fast+react"
-                        if classified.get("use_fast_path")
-                        and classified.get("fast_model")
-                        else "fast-only-fallback"
-                        if req.model == "audrey_fast"
-                        else "deep"
-                    ),
-                    classified.get("task_type"),
-                    classified.get("confidence", 0.0),
-                    classified.get("fast_model", ""),
-                )
-
-                # Decide path — search is handled by tool-calling during generation
-                if classified.get("use_fast_path") and classified.get("fast_model"):
-                    fast_model = str(classified.get("fast_model", "")).strip()
-                    if EMIT_STATUS_UPDATES:
-                        yield _sc(
-                            rid,
-                            ct,
-                            req.model,
-                            f"⚡ Running fast model: {fast_model} (tools/search)\n",
-                        )
-                    if EMIT_ROUTING_BANNER and fast_model:
-                        yield _sc(
-                            rid,
-                            ct,
-                            req.model,
-                            banner(classified, running_model=fast_model),
-                        )
-
-                    fast_result = None
-                    async for chunk, result in _await_stream_stage(
-                        FAST_GRAPH.ainvoke(classified),
-                        rid=rid,
-                        created=ct,
-                        model_name=req.model,
-                        request_id=request_id,
-                        stage="fast_graph",
-                        heartbeat_text="Still running fast path (tools/search)",
-                    ):
-                        if chunk is not None:
-                            yield chunk
+                while True:
+                    # Advance the orchestrator — with heartbeat wrapping
+                    # when the previous yield was a starting: stage.
+                    try:
+                        if pending_heartbeat is not None:
+                            hb_text, hb_stage, hb_style = pending_heartbeat
+                            pending_heartbeat = None
+                            async for chunk_or_result in _await_stream_stage(
+                                _next_stage(),
+                                rid=rid,
+                                created=ct,
+                                model_name=mn,
+                                request_id=request_id,
+                                stage=hb_stage,
+                                heartbeat_text=hb_text or f"Processing {hb_stage}...",
+                                heartbeat_style=hb_style,
+                            ):
+                                sse_chunk, value = chunk_or_result
+                                if sse_chunk is not None:
+                                    yield sse_chunk
+                                if value is not _STREAM_STAGE_DONE:
+                                    stage_name, st, hints = value
                         else:
-                            fast_result = result
+                            stage_name, st, hints = await _next_stage()
+                    except StopAsyncIteration:
+                        break
 
-                    if fast_result is None:
-                        raise RuntimeError("Fast graph completed without a result")
+                    s = st
+                    last_stage = stage_name
 
-                    if (
-                        fast_result.get("use_fast_path")
-                        and fast_result.get("result_text")
-                        and not fast_result.get("escalated")
-                    ):
+                    # ── Before each stage: emit status, set up heartbeat ──
+                    if stage_name.startswith("starting:"):
+                        status_text, hb_stage, hb_style = _STAGE_STATUS.get(
+                            stage_name, ("", stage_name.split(":", 1)[1], "line"),
+                        )
+                        if status_text and EMIT_STATUS_UPDATES:
+                            yield _sc(rid, ct, mn, status_text)
+
+                        if stage_name == "starting:fast_react":
+                            fm = str(s.get("fast_model", "")).strip()
+                            if EMIT_STATUS_UPDATES and fm:
+                                yield _sc(rid, ct, mn, f"⚡ Running fast model: {fm} (tools/search)\n")
+                            if EMIT_ROUTING_BANNER and fm:
+                                yield _sc(rid, ct, mn, banner(s, running_model=fm))
+
+                        if stage_name == "starting:generate":
+                            dw = [str(w).strip() for w in s.get("deep_workers", []) if str(w).strip()]
+                            if s.get("sub_tasks") and EMIT_STATUS_UPDATES:
+                                yield _sc(rid, ct, mn, f"📋 Planning: {len(s['sub_tasks'])} sub-tasks\n")
+                            if EMIT_ROUTING_BANNER and dw:
+                                yield _sc(rid, ct, mn, banner(s, running_model=", ".join(dw)))
+
+                        pending_heartbeat = (status_text, hb_stage, hb_style)
+                        continue
+
+                    # ── After classify ──────────────────────────────
+                    if stage_name == "done:classify":
+                        evt = _evt(s, stage="classify", message="Request classified",
+                                   details={"task_type": s.get("task_type"),
+                                            "confidence": s.get("confidence"),
+                                            "use_fast_path": bool(s.get("use_fast_path"))})
+                        if evt:
+                            yield evt
+
+                    # ── Fast path completed successfully ────────────
+                    elif stage_name == "done:complete_fast":
+                        sel = s.get("selected_model", s.get("fast_model", "?"))
                         if req.model == "audrey_fast":
                             state.update_audrey_fast_health(
-                                selected_model=fast_result.get(
-                                    "selected_model",
-                                    fast_result.get("fast_model", "none"),
-                                ),
-                                success=True,
-                                reason=fast_result.get(
-                                    "route_reason", "fast_only:completed"
-                                ),
-                            )
-                        selected_fast_model = fast_result.get(
-                            "selected_model",
-                            fast_result.get("fast_model", "?"),
-                        )
+                                selected_model=sel, success=True,
+                                reason=s.get("route_reason", "fast_only:completed"))
                         if EMIT_STATUS_UPDATES:
-                            yield _sc(
-                                rid,
-                                ct,
-                                req.model,
-                                f"✅ Fast model finished: {selected_fast_model}\n\n",
-                            )
-                            if fast_result.get("search_performed"):
-                                search_query = str(
-                                    fast_result.get("search_query", "")
-                                ).strip()
-                                if search_query:
-                                    yield _sc(
-                                        rid,
-                                        ct,
-                                        req.model,
-                                        f"🌐 Web search used: {search_query}\n",
-                                    )
-                                else:
-                                    yield _sc(rid, ct, req.model, "🌐 Web search used\n")
+                            yield _sc(rid, ct, mn, f"✅ Fast model finished: {sel}\n\n")
+                            if s.get("search_performed"):
+                                sq = str(s.get("search_query", "")).strip()
+                                yield _sc(rid, ct, mn,
+                                          f"🌐 Web search used: {sq}\n" if sq else "🌐 Web search used\n")
                         if EMIT_ROUTING_BANNER:
-                            yield _sc(
-                                rid,
-                                ct,
-                                req.model,
-                                banner(fast_result, finished_model=selected_fast_model),
-                            )
-                        fast_complete_evt = _emit_timeline_event(
-                            fast_result,
-                            stage="complete",
-                            message="Completed on fast path",
-                            status="success",
-                            details={
-                                "selected_model": fast_result.get(
-                                    "selected_model",
-                                    fast_result.get("fast_model", ""),
-                                )
-                            },
-                        )
-                        if fast_complete_evt:
-                            yield fast_complete_evt
-
-                        content = fast_result["result_text"]
-                        if content:
-                            for i in range(0, len(content), _STREAM_RESULT_CHUNK_CHARS):
-                                yield _sc(
-                                    rid,
-                                    ct,
-                                    req.model,
-                                    content[i : i + _STREAM_RESULT_CHUNK_CHARS],
-                                )
+                            yield _sc(rid, ct, mn, banner(s, finished_model=sel))
+                        evt = _evt(s, stage="complete", message="Completed on fast path",
+                                   status="success", details={"selected_model": sel})
+                        if evt:
+                            yield evt
+                        content = s.get("result_text", "")
+                        for i in range(0, len(content), _STREAM_RESULT_CHUNK_CHARS):
+                            yield _sc(rid, ct, mn, content[i:i + _STREAM_RESULT_CHUNK_CHARS])
                         if EMIT_TRUST_SIGNALS:
-                            yield _sc_event(
-                                rid,
-                                ct,
-                                req.model,
-                                {
-                                    "stage": "trust",
-                                    "status": "info",
-                                    "message": "Trust signals",
-                                    "details": build_trust_signals(fast_result),
-                                },
-                            )
-
-                        yield _sc_stop(rid, ct, req.model)
+                            yield _sc_event(rid, ct, mn, {"stage": "trust", "status": "info",
+                                                          "message": "Trust signals",
+                                                          "details": build_trust_signals(s)})
+                        yield _sc_stop(rid, ct, mn)
                         yield _SSE_DONE
                         return
 
-                    if req.model == "audrey_fast":
-                        state.update_audrey_fast_health(
-                            selected_model=fast_result.get("selected_model", "none"),
-                            success=False,
-                            reason=fast_result.get("route_reason", "fast_only:fallback"),
-                        )
-                        fallback_evt = _emit_timeline_event(
-                            fast_result,
-                            stage="complete",
-                            message="Fast-only request returned fallback message",
-                            status="warning",
-                        )
-                        if fallback_evt:
-                            yield fallback_evt
-                        yield _sc(rid, ct, req.model, f"{_FAST_ONLY_FALLBACK_TEXT}\n")
-                        yield _sc_stop(rid, ct, req.model)
+                    # ── Fast-only fallback ──────────────────────────
+                    elif stage_name == "done:fast_only_fallback":
+                        _finalize_fast_only(s)
+                        evt = _evt(s, stage="complete", message="Fast-only fallback", status="warning")
+                        if evt:
+                            yield evt
+                        yield _sc(rid, ct, mn, f"{_FAST_ONLY_FALLBACK_TEXT}\n")
+                        yield _sc_stop(rid, ct, mn)
                         yield _SSE_DONE
                         return
 
-                    # Fast path was skipped/failed/escalated in audrey_deep, so continue to deep panel.
-                    classified = fast_result
-                    if classified.get("escalated"):
-                        esc_evt = _emit_timeline_event(
-                            classified,
-                            stage="escalation",
-                            message="Escalated from fast path to deep panel",
-                            status="warning",
-                            details={"reason": classified.get("route_reason", "")},
-                        )
-                        if esc_evt:
-                            yield esc_evt
-                elif req.model == "audrey_fast":
-                    state.update_audrey_fast_health(
-                        selected_model=classified.get("fast_model", "none"),
-                        success=False,
-                        reason=classified.get("route_reason", "fast_only:fallback"),
-                    )
-                    fallback_evt = _emit_timeline_event(
-                        classified,
-                        stage="complete",
-                        message="Fast-only request returned fallback message",
-                        status="warning",
-                    )
-                    if fallback_evt:
-                        yield fallback_evt
-                    yield _sc(rid, ct, req.model, f"{_FAST_ONLY_FALLBACK_TEXT}\n")
-                    yield _sc_stop(rid, ct, req.model)
-                    yield _SSE_DONE
-                    return
+                    # ── Escalation ──────────────────────────────────
+                    elif stage_name == "done:escalation":
+                        evt = _evt(s, stage="escalation",
+                                   message="Escalated from fast path to deep panel", status="warning",
+                                   details={"reason": s.get("route_reason", "")})
+                        if evt:
+                            yield evt
 
-                # Deep panel (audrey_deep)
-                deep_evt = _emit_timeline_event(
-                    classified,
-                    stage="deep_path",
-                    message="Running deep-panel pipeline",
-                )
-                if deep_evt:
-                    yield deep_evt
-                if EMIT_STATUS_UPDATES:
-                    yield _sc(rid, ct, req.model, "📋 Planning approach...\n")
+                    # ── Deep: plan done ─────────────────────────────
+                    elif stage_name == "done:plan":
+                        evt = _evt(s, stage="plan", message="Deep-panel plan ready",
+                                   details={"workers": len(s.get("deep_workers", [])),
+                                            "planned_sub_tasks": len(s.get("sub_tasks") or [])})
+                        if evt:
+                            yield evt
 
-                planned = None
-                async for chunk, result in _await_stream_stage(
-                    node_plan_panel(classified),
-                    rid=rid,
-                    created=ct,
-                    model_name=req.model,
-                    request_id=request_id,
-                    stage="plan",
-                    heartbeat_text="Still planning deep-panel approach",
-                ):
-                    if chunk is not None:
-                        yield chunk
-                    else:
-                        planned = result
+                    # ── Deep: generate done ─────────────────────────
+                    elif stage_name == "done:generate":
+                        evt = _evt(s, stage="generate", message="Worker drafts generated",
+                                   details={"outputs": len(s.get("worker_outputs", []))})
+                        if evt:
+                            yield evt
+                        fw = [str(o.get("model", "")).strip()
+                              for o in s.get("worker_outputs", [])
+                              if str(o.get("model", "")).strip()]
+                        fw_text = ", ".join(dict.fromkeys(fw)) or "none"
+                        if EMIT_STATUS_UPDATES:
+                            yield _sc(rid, ct, mn, f"\n✅ Worker models finished: {fw_text}\n")
+                        if EMIT_ROUTING_BANNER and fw_text != "none":
+                            yield _sc(rid, ct, mn, banner(s, finished_model=fw_text))
 
-                if planned is None:
-                    raise RuntimeError("Planning stage completed without a result")
-                plan_evt = _emit_timeline_event(
-                    planned,
-                    stage="plan",
-                    message="Deep-panel plan ready",
-                    details={
-                        "workers": len(planned.get("deep_workers", [])),
-                        "planned_sub_tasks": len(planned.get("sub_tasks") or []),
-                    },
-                )
-                if plan_evt:
-                    yield plan_evt
+                    # ── Deep: synthesis prepared ────────────────────
+                    elif stage_name == "done:prepare_synthesis":
+                        evt = _evt(s, stage="prepare_synthesis", message="Synthesis context prepared")
+                        if evt:
+                            yield evt
+                        if EMIT_TRUST_SIGNALS:
+                            yield _sc_event(rid, ct, mn, {"stage": "trust", "status": "info",
+                                                          "message": "Trust signals",
+                                                          "details": build_trust_signals(s)})
 
-                if EMIT_STATUS_UPDATES and planned.get("sub_tasks"):
-                    yield _sc(
-                        rid,
-                        ct,
-                        req.model,
-                        f"📋 Planning: {len(planned['sub_tasks'])} sub-tasks\n",
-                    )
-                deep_workers = [
-                    str(w).strip()
-                    for w in planned.get("deep_workers", [])
-                    if str(w).strip()
-                ]
-                workers_text = ", ".join(deep_workers) if deep_workers else "none"
-                if EMIT_STATUS_UPDATES:
-                    yield _sc(
-                        rid,
-                        ct,
-                        req.model,
-                        "🧠 Generating worker drafts",
-                    )
-                if EMIT_ROUTING_BANNER and deep_workers:
-                    yield _sc(
-                        rid,
-                        ct,
-                        req.model,
-                        banner(planned, running_model=workers_text),
-                    )
-
-                generated = None
-                async for chunk, result in _await_stream_stage(
-                    node_parallel_generate(planned),
-                    rid=rid,
-                    created=ct,
-                    model_name=req.model,
-                    request_id=request_id,
-                    stage="parallel_generate",
-                    heartbeat_text="Generating worker drafts",
-                    heartbeat_style="dots",
-                ):
-                    if chunk is not None:
-                        yield chunk
-                    else:
-                        generated = result
-
-                if generated is None:
-                    raise RuntimeError(
-                        "Parallel generation stage completed without a result"
-                    )
-                generate_evt = _emit_timeline_event(
-                    generated,
-                    stage="generate",
-                    message="Worker drafts generated",
-                    details={"outputs": len(generated.get("worker_outputs", []))},
-                )
-                if generate_evt:
-                    yield generate_evt
-                finished_workers = [
-                    str(o.get("model", "")).strip()
-                    for o in generated.get("worker_outputs", [])
-                    if str(o.get("model", "")).strip()
-                ]
-                finished_workers_text = (
-                    ", ".join(dict.fromkeys(finished_workers))
-                    or workers_text
-                )
-                if EMIT_STATUS_UPDATES:
-                    yield _sc(
-                        rid,
-                        ct,
-                        req.model,
-                        f"✅ Worker models finished: {finished_workers_text}\n",
-                    )
-                if (
-                    EMIT_ROUTING_BANNER
-                    and finished_workers_text
-                    and finished_workers_text != "none"
-                ):
-                    yield _sc(
-                        rid,
-                        ct,
-                        req.model,
-                        banner(generated, finished_model=finished_workers_text),
-                    )
-
-                if EMIT_STATUS_UPDATES:
-                    yield _sc(rid, ct, req.model, "🧩 Preparing synthesis...\n")
-
-                prepared = None
-                async for chunk, result in _await_stream_stage(
-                    node_prepare_synthesis(generated),
-                    rid=rid,
-                    created=ct,
-                    model_name=req.model,
-                    request_id=request_id,
-                    stage="prepare_synthesis",
-                    heartbeat_text="Still preparing synthesis",
-                ):
-                    if chunk is not None:
-                        yield chunk
-                    else:
-                        prepared = result
-
-                if prepared is None:
-                    raise RuntimeError(
-                        "Synthesis preparation stage completed without a result"
-                    )
-                prep_evt = _emit_timeline_event(
-                    prepared,
-                    stage="prepare_synthesis",
-                    message="Synthesis context prepared",
-                )
-                if prep_evt:
-                    yield prep_evt
-                if EMIT_TRUST_SIGNALS:
-                    yield _sc_event(
-                        rid,
-                        ct,
-                        req.model,
-                        {
-                            "stage": "trust",
-                            "status": "info",
-                            "message": "Trust signals",
-                            "details": build_trust_signals(prepared),
-                        },
-                    )
-
-                async for chunk in stream_synthesis(prepared, rid=rid, created=ct):
+                # Orchestrator finished without early return → deep panel with streaming synthesis.
+                async for chunk in stream_synthesis(s, rid=rid, created=ct):
                     yield chunk
+
             except Exception as e:
-                logger.exception(
-                    "Streaming request failed rid=%s model=%s: %s",
-                    request_id,
-                    req.model,
-                    e,
-                )
+                logger.exception("Streaming request failed rid=%s model=%s: %s", request_id, mn, e)
                 error_text = str(e).strip() or "internal error"
-                yield _sc(rid, ct, req.model, f"[Error: {error_text[:240]}]\n")
-                yield _sc_stop(rid, ct, req.model)
+                yield _sc(rid, ct, mn, f"[Error: {error_text[:240]}]\n")
+                yield _sc_stop(rid, ct, mn)
                 yield _SSE_DONE
 
         return StreamingResponse(
             _stream(),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     # ── Non-streaming ────────────────────────────────────────────────────

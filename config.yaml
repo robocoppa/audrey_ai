@@ -90,10 +90,6 @@ model_registry:
       priority: 7
       speed: 7
       quality: 8
-    - name: "qwen3.5:35b-a3b"
-      priority: 5
-      speed: 6
-      quality: 9
 # ─── Fast Path ───
 # For high-confidence simple requests, skip the multi-worker deep panel
 # and use a single model from model_registry directly.
