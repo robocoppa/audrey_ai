@@ -321,8 +321,15 @@ async def node_parallel_generate(s):
     base = s["messages"]
     sub_tasks = s.get("sub_tasks")
     is_review = s.get("is_code_review", False)
+    progress_queue: asyncio.Queue | None = s.get("worker_progress_queue")
+
+    async def _emit(event: dict[str, Any]) -> None:
+        if progress_queue is not None:
+            await progress_queue.put(event)
 
     async def one(wn, sub_task=None):
+        started = asyncio.get_event_loop().time()
+        await _emit({"type": "worker_started", "model": wn, "sub_task": sub_task or ""})
         if sub_task:
             sys_content = (
                 f"{role_prompt(s['task_type'], wn, structured=True, is_code_review=is_review)}\n\n"
@@ -343,6 +350,14 @@ async def node_parallel_generate(s):
                 timeout=DEEP_WORKER_TIMEOUT,
             )
             note_model_success(wn)
+            elapsed_ms = int((asyncio.get_event_loop().time() - started) * 1000)
+            await _emit({
+                "type": "worker_finished",
+                "model": wn,
+                "status": "success",
+                "elapsed_ms": elapsed_ms,
+                "sub_task": sub_task or "",
+            })
             label = f" [sub-task: {sub_task[:50]}]" if sub_task else ""
             return {
                 "model": wn,
@@ -353,9 +368,18 @@ async def node_parallel_generate(s):
             }
         except Exception as e:
             note_model_failure(wn)
+            elapsed_ms = int((asyncio.get_event_loop().time() - started) * 1000)
             logger.warning(
                 "Worker %s failed: %s\n%s", wn, e, traceback.format_exc()
             )
+            await _emit({
+                "type": "worker_finished",
+                "model": wn,
+                "status": "error",
+                "elapsed_ms": elapsed_ms,
+                "sub_task": sub_task or "",
+                "error": str(e)[:160],
+            })
             return {
                 "model": wn,
                 "content": f"{_WORKER_ERROR_PREFIX} Unable to respond.",

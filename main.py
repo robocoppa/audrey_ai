@@ -262,6 +262,51 @@ async def _orchestrate(
         yield ("done:reflect", s, {})
 
 
+def _format_worker_event(
+    rid: str,
+    created: int,
+    model_name: str,
+    event: dict[str, Any],
+) -> list[str]:
+    """Render a worker progress event as SSE chunks for the client."""
+    chunks: list[str] = []
+    etype = event.get("type")
+    wn = str(event.get("model", "?"))
+    if etype == "worker_started":
+        if EMIT_STATUS_UPDATES:
+            chunks.append(_sc(rid, created, model_name, f"\n▶ Running: {wn}\n"))
+        if EMIT_TIMELINE_EVENTS:
+            chunks.append(_sc_event(rid, created, model_name, {
+                "stage": "worker_started",
+                "status": "info",
+                "message": f"Worker {wn} started",
+                "details": {"model": wn, "sub_task": event.get("sub_task", "")},
+            }))
+    elif etype == "worker_finished":
+        status = event.get("status", "success")
+        ms = int(event.get("elapsed_ms", 0) or 0)
+        secs = ms / 1000.0
+        if EMIT_STATUS_UPDATES:
+            icon = "✅" if status == "success" else "⚠"
+            chunks.append(_sc(
+                rid, created, model_name,
+                f"{icon} Finished: {wn} ({secs:.1f}s)\n",
+            ))
+        if EMIT_TIMELINE_EVENTS:
+            chunks.append(_sc_event(rid, created, model_name, {
+                "stage": "worker_finished",
+                "status": "success" if status == "success" else "warning",
+                "message": f"Worker {wn} {status}",
+                "details": {
+                    "model": wn,
+                    "elapsed_ms": ms,
+                    "sub_task": event.get("sub_task", ""),
+                    "error": event.get("error", ""),
+                },
+            }))
+    return chunks
+
+
 async def _await_stream_stage(
     awaitable: Awaitable[Any],
     *,
@@ -272,6 +317,7 @@ async def _await_stream_stage(
     stage: str,
     heartbeat_text: str,
     heartbeat_style: str = "line",
+    progress_queue: asyncio.Queue | None = None,
 ) -> AsyncGenerator[tuple[str | None, Any], None]:
     started = time.monotonic()
     heartbeat_ticks = 0
@@ -285,6 +331,18 @@ async def _await_stream_stage(
         model_name,
     )
 
+    def _drain_queue() -> list[str]:
+        out: list[str] = []
+        if progress_queue is None:
+            return out
+        while True:
+            try:
+                evt = progress_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            out.extend(_format_worker_event(rid, created, model_name, evt))
+        return out
+
     if heartbeat_interval_s <= 0:
         result = await awaitable
         elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -294,6 +352,8 @@ async def _await_stream_stage(
             stage,
             elapsed_ms,
         )
+        for chunk in _drain_queue():
+            yield (chunk, _STREAM_STAGE_DONE)
         yield None, result
         return
 
@@ -312,11 +372,17 @@ async def _await_stream_stage(
                     stage,
                     elapsed_ms,
                 )
+                for chunk in _drain_queue():
+                    yield (chunk, _STREAM_STAGE_DONE)
                 if EMIT_STATUS_UPDATES and heartbeat_style == "dots":
                     yield (_sc(rid, created, model_name, "\n"), _STREAM_STAGE_DONE)
                 yield None, result
                 return
             except asyncio.TimeoutError:
+                # Drain any worker progress events that landed during this tick
+                # so the client sees them promptly, not at stage end.
+                for chunk in _drain_queue():
+                    yield (chunk, _STREAM_STAGE_DONE)
                 heartbeat_ticks += 1
                 elapsed_s = heartbeat_ticks * heartbeat_interval_s
                 actual_elapsed_s = max(1, int(time.monotonic() - started))
@@ -796,6 +862,13 @@ async def chat_completions(req: ChatCompletionRequest):
                         if pending_heartbeat is not None:
                             hb_text, hb_stage, hb_style = pending_heartbeat
                             pending_heartbeat = None
+                            # Only the parallel_generate stage currently emits
+                            # per-worker progress events via this queue.
+                            stage_progress_q = (
+                                s.get("worker_progress_queue")
+                                if hb_stage == "parallel_generate"
+                                else None
+                            )
                             async for chunk_or_result in _await_stream_stage(
                                 _next_stage(),
                                 rid=rid,
@@ -805,6 +878,7 @@ async def chat_completions(req: ChatCompletionRequest):
                                 stage=hb_stage,
                                 heartbeat_text=hb_text or f"Processing {hb_stage}...",
                                 heartbeat_style=hb_style,
+                                progress_queue=stage_progress_q,
                             ):
                                 sse_chunk, value = chunk_or_result
                                 if sse_chunk is not None:
@@ -840,6 +914,9 @@ async def chat_completions(req: ChatCompletionRequest):
                                 yield _sc(rid, ct, mn, f"📋 Planning: {len(s['sub_tasks'])} sub-tasks\n")
                             if EMIT_ROUTING_BANNER and dw:
                                 yield _sc(rid, ct, mn, banner(s, running_model=", ".join(dw)))
+                            # Wire up a progress queue so workers can report
+                            # started/finished events while running in parallel.
+                            s["worker_progress_queue"] = asyncio.Queue()
 
                         pending_heartbeat = (status_text, hb_stage, hb_style)
                         continue
@@ -912,6 +989,7 @@ async def chat_completions(req: ChatCompletionRequest):
 
                     # ── Deep: generate done ─────────────────────────
                     elif stage_name == "done:generate":
+                        s.pop("worker_progress_queue", None)
                         evt = _evt(s, stage="generate", message="Worker drafts generated",
                                    details={"outputs": len(s.get("worker_outputs", []))})
                         if evt:
@@ -921,7 +999,7 @@ async def chat_completions(req: ChatCompletionRequest):
                               if str(o.get("model", "")).strip()]
                         fw_text = ", ".join(dict.fromkeys(fw)) or "none"
                         if EMIT_STATUS_UPDATES:
-                            yield _sc(rid, ct, mn, f"\n✅ Worker models finished: {fw_text}\n")
+                            yield _sc(rid, ct, mn, f"\n✅ All workers finished: {fw_text}\n")
                         if EMIT_ROUTING_BANNER and fw_text != "none":
                             yield _sc(rid, ct, mn, banner(s, finished_model=fw_text))
 
