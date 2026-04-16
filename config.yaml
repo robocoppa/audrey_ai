@@ -269,7 +269,7 @@ timeouts:
   router: 20
   small: 60
   medium: 180
-  large: 360
+  large: 600
   cloud: 120
   deep_worker: 600
   fast_path: 180

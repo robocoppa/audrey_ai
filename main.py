@@ -525,39 +525,42 @@ async def lifespan(app):
         timeout=aiohttp.ClientTimeout(total=15)
     )
 
-    state.tool_registry = ToolRegistry(session=state.ext_session)
+    try:
+        state.tool_registry = ToolRegistry(session=state.ext_session)
 
-    if TOOL_SERVER_URLS and TOOLS_ENABLED:
-        await state.tool_registry.discover(TOOL_SERVER_URLS)
+        if TOOL_SERVER_URLS and TOOLS_ENABLED:
+            await state.tool_registry.discover(TOOL_SERVER_URLS)
+            logger.info(
+                "Tools: %d discovered from %d servers",
+                state.tool_registry.tool_count,
+                len(TOOL_SERVER_URLS),
+            )
+
+        await validate_models()
+
         logger.info(
-            "Tools: %d discovered from %d servers",
+            "Audrey ready  router=%s  tools=%s(%d)  search=%s  fast_path=%s  "
+            "react=%s  reflect=%s  plan=%s  escalate=%s  "
+            "max_workers_local=%d  max_workers_cloud=%d",
+            ROUTER_MODEL,
+            TOOLS_ENABLED,
             state.tool_registry.tool_count,
-            len(TOOL_SERVER_URLS),
+            SEARCH_BACKEND,
+            FAST_PATH_ENABLED,
+            REACT_MAX_ROUNDS,
+            REFLECTION_ENABLED,
+            PLANNING_ENABLED,
+            ESCALATION_ENABLED,
+            MAX_DEEP_WORKERS,
+            MAX_DEEP_WORKERS_CLOUD,
         )
 
-    await validate_models()
-
-    logger.info(
-        "Audrey ready  router=%s  tools=%s(%d)  search=%s  fast_path=%s  "
-        "react=%s  reflect=%s  plan=%s  escalate=%s  "
-        "max_workers_local=%d  max_workers_cloud=%d",
-        ROUTER_MODEL,
-        TOOLS_ENABLED,
-        state.tool_registry.tool_count,
-        SEARCH_BACKEND,
-        FAST_PATH_ENABLED,
-        REACT_MAX_ROUNDS,
-        REFLECTION_ENABLED,
-        PLANNING_ENABLED,
-        ESCALATION_ENABLED,
-        MAX_DEEP_WORKERS,
-        MAX_DEEP_WORKERS_CLOUD,
-    )
-
-    yield
-
-    await state.ollama_session.close()
-    await state.ext_session.close()
+        yield
+    finally:
+        if state.ollama_session and not state.ollama_session.closed:
+            await state.ollama_session.close()
+        if state.ext_session and not state.ext_session.closed:
+            await state.ext_session.close()
 
 
 app = FastAPI(
