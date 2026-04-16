@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m py_compile pipeline.py)",
+      "Bash(python3 -m py_compile config.py ollama.py pipeline.py main.py)"
+    ]
+  }
+}

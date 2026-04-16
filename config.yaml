@@ -123,7 +123,7 @@ deep_panel:
       - "qwen3.5:397b-cloud"
       - "deepseek-v3.2:cloud"
       - "qwen3-coder-next:latest"
-    synthesizer: "qwen3.5:35b-a3b"
+    synthesizer: "qwen3.5:397b-cloud"
     fallback_synthesizer: "glm-5.1:cloud"
 
   reasoning:
@@ -187,7 +187,7 @@ deep_panel_local:
   code:
     workers:
       - "qwen3-coder-next:latest"
-    synthesizer: "qwen3.5:35b-a3b"
+    synthesizer: "deepseek-r1:32b"
     fallback_synthesizer: "qwen3.5:35b-a3b"
 
   reasoning:
@@ -217,7 +217,7 @@ deep_panel_code:
       - "qwen3-coder-next:latest"
       - "deepseek-v3.2:cloud"
       - "qwen3.5:397b-cloud"
-    synthesizer: "qwen3.5:35b-a3b"
+    synthesizer: "qwen3.5:397b-cloud"
     fallback_synthesizer: "deepseek-v3.2:cloud"
 
   reasoning:
@@ -225,7 +225,7 @@ deep_panel_code:
       - "qwen3-coder-next:latest"
       - "deepseek-v3.2:cloud"
       - "qwen3.5:397b-cloud"
-    synthesizer: "qwen3.5:35b-a3b"
+    synthesizer: "qwen3.5:397b-cloud"
     fallback_synthesizer: "deepseek-v3.2:cloud"
 
   vl:
@@ -233,7 +233,7 @@ deep_panel_code:
       - "qwen3-coder-next:latest"
       - "deepseek-v3.2:cloud"
       - "qwen3.5:397b-cloud"
-    synthesizer: "qwen3.5:35b-a3b"
+    synthesizer: "qwen3.5:397b-cloud"
     fallback_synthesizer: "deepseek-v3.2:cloud"
 
   general:
@@ -241,7 +241,7 @@ deep_panel_code:
       - "qwen3-coder-next:latest"
       - "deepseek-v3.2:cloud"
       - "qwen3.5:397b-cloud"
-    synthesizer: "qwen3.5:35b-a3b"
+    synthesizer: "qwen3.5:397b-cloud"
     fallback_synthesizer: "deepseek-v3.2:cloud"
 
 # ─── Agentic Features ───

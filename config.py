@@ -69,6 +69,12 @@ MAX_DEEP_WORKERS = int(os.getenv("MAX_DEEP_WORKERS", "2"))
 MAX_DEEP_WORKERS_CLOUD = int(os.getenv("MAX_DEEP_WORKERS_CLOUD", "3"))
 EMIT_ROUTING_BANNER = os.getenv("EMIT_ROUTING_BANNER", "true").lower() == "true"
 GPU_CONCURRENCY = int(os.getenv("GPU_CONCURRENCY", "1"))
+# When true, send keep_alive=0 to Ollama for non-synthesizer local workers so
+# the model unloads after its draft, freeing VRAM for the next worker or the
+# synthesizer. Avoids eviction thrash on tight-VRAM hosts with 30B+ models.
+OLLAMA_LOCAL_UNLOAD_BETWEEN_WORKERS = os.getenv(
+    "OLLAMA_LOCAL_UNLOAD_BETWEEN_WORKERS", "true"
+).lower() in ("true", "1", "yes")
 EMIT_STATUS_UPDATES = os.getenv("EMIT_STATUS_UPDATES", "true").lower() == "true"
 EMIT_TIMELINE_EVENTS = os.getenv("EMIT_TIMELINE_EVENTS", "true").lower() == "true"
 EMIT_TRUST_SIGNALS = os.getenv("EMIT_TRUST_SIGNALS", "true").lower() == "true"

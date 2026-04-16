@@ -21,6 +21,7 @@ from config import (
     LOW_CONFIDENCE_THRESHOLD,
     MAX_DEEP_WORKERS,
     MAX_DEEP_WORKERS_CLOUD,
+    OLLAMA_LOCAL_UNLOAD_BETWEEN_WORKERS,
     REFLECTION_ENABLED,
     REFLECTION_MAX_RETRIES,
     deep_panel_for_model,
@@ -322,6 +323,23 @@ async def node_parallel_generate(s):
     sub_tasks = s.get("sub_tasks")
     is_review = s.get("is_code_review", False)
     progress_queue: asyncio.Queue | None = s.get("worker_progress_queue")
+    planned_synth = str(s.get("synthesizer", "")).strip()
+    fallback_synth = str(s.get("fallback_synthesizer", "")).strip()
+    # Keep any model that may be chosen as the synthesizer resident; unload the
+    # rest after their draft to avoid VRAM eviction thrash on tight hosts.
+    warm_locals = {
+        m for m in (planned_synth, fallback_synth)
+        if m and not is_cloud_model(m)
+    }
+
+    def _worker_keep_alive(wn: str) -> Any | None:
+        if not OLLAMA_LOCAL_UNLOAD_BETWEEN_WORKERS:
+            return None
+        if is_cloud_model(wn):
+            return None
+        if wn in warm_locals:
+            return None
+        return 0
 
     async def _emit(event: dict[str, Any]) -> None:
         if progress_queue is not None:
@@ -340,12 +358,16 @@ async def node_parallel_generate(s):
             sys_content = role_prompt(s["task_type"], wn, structured=True, is_code_review=is_review)
 
         sys = {"role": "system", "content": sys_content}
+        ka = _worker_keep_alive(wn)
+        call_kwargs = model_call_kwargs(s)
+        if ka is not None:
+            call_kwargs["keep_alive"] = ka
         try:
             t, tool_calls_log = await asyncio.wait_for(
                 run_model_with_tools_detailed(
                     wn,
                     [sys, *base],
-                    **model_call_kwargs(s),
+                    **call_kwargs,
                 ),
                 timeout=DEEP_WORKER_TIMEOUT,
             )
@@ -661,24 +683,32 @@ def resolve_synthesis_candidates(s: dict[str, Any]) -> list[str]:
         ordered = [primary, fallback]
         strategy = "configured_first"
 
-    candidates: list[str] = []
+    deduped: list[str] = []
     for name in ordered:
         model_name = str(name or "").strip()
-        if model_name and model_name not in candidates:
-            candidates.append(model_name)
+        if model_name and model_name not in deduped:
+            deduped.append(model_name)
 
-    if not candidates:
+    if not deduped:
         raise RuntimeError("No synthesis candidates configured")
+
+    # Deprioritize models currently in cooldown rather than drop them outright
+    # — if every candidate is unhealthy we still need something to try.
+    healthy = [m for m in deduped if is_model_healthy(m)]
+    cooled = [m for m in deduped if not is_model_healthy(m)]
+    candidates = healthy + cooled if healthy else deduped
+    demoted = [m for m in cooled if m in candidates[len(healthy):]]
 
     s["synthesis_candidates"] = candidates
     s["synthesis_strategy"] = strategy
     s["synthesis_escalation_reason"] = escalation_reason
     s["synthesizer"] = candidates[0]
     logger.info(
-        "Synthesis routing: strategy=%s reason=%s candidates=%s",
+        "Synthesis routing: strategy=%s reason=%s candidates=%s demoted_unhealthy=%s",
         strategy,
         escalation_reason or "none",
         candidates,
+        demoted or "none",
     )
     return candidates
 

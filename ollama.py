@@ -33,6 +33,7 @@ def build_ollama_payload(
     frequency_penalty: float | None = None,
     presence_penalty: float | None = None,
     tools: list[dict[str, Any]] | None = None,
+    keep_alive: Any | None = None,
 ) -> dict[str, Any]:
     p: dict[str, Any] = {
         "model": model,
@@ -52,6 +53,8 @@ def build_ollama_payload(
         p["options"]["presence_penalty"] = presence_penalty
     if tools:
         p["tools"] = tools
+    if keep_alive is not None:
+        p["keep_alive"] = keep_alive
     return p
 
 
@@ -69,6 +72,7 @@ async def ollama_chat_once(
     presence_penalty: float | None = None,
     tools: list[dict[str, Any]] | None = None,
     request_timeout: int | None = None,
+    keep_alive: Any | None = None,
 ) -> dict[str, Any]:
     pl = build_ollama_payload(
         model, msgs,
@@ -76,6 +80,7 @@ async def ollama_chat_once(
         stop=stop, stream=False,
         frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
         tools=tools,
+        keep_alive=keep_alive,
     )
     tout = request_timeout or timeout_for_model(model)
 
@@ -154,12 +159,14 @@ async def run_model_once(
     stop: Any | None,
     frequency_penalty: float | None = None,
     presence_penalty: float | None = None,
+    keep_alive: Any | None = None,
 ) -> str:
     d = await ollama_chat_once(
         model, msgs,
         temperature=temperature, max_tokens=max_tokens, top_p=top_p,
         stop=stop,
         frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
+        keep_alive=keep_alive,
     )
     c = d["message"]["content"]
     if not c or not c.strip():
@@ -178,6 +185,7 @@ async def run_model_with_tools(
     frequency_penalty: float | None = None,
     presence_penalty: float | None = None,
     max_tool_rounds: int | None = None,
+    keep_alive: Any | None = None,
 ) -> str:
     content, _ = await run_model_with_tools_detailed(
         model,
@@ -189,6 +197,7 @@ async def run_model_with_tools(
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
         max_tool_rounds=max_tool_rounds,
+        keep_alive=keep_alive,
     )
     return content
 
@@ -204,6 +213,7 @@ async def run_model_with_tools_detailed(
     frequency_penalty: float | None = None,
     presence_penalty: float | None = None,
     max_tool_rounds: int | None = None,
+    keep_alive: Any | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run a model with tool-calling support via the tool registry.
 
@@ -227,6 +237,7 @@ async def run_model_with_tools_detailed(
             temperature=temperature, max_tokens=max_tokens, top_p=top_p,
             stop=stop,
             frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
+            keep_alive=keep_alive,
         )
         return content, []
 
@@ -239,6 +250,7 @@ async def run_model_with_tools_detailed(
             stop=stop,
             frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
             tools=tool_defs,
+            keep_alive=keep_alive,
         )
 
     try:
