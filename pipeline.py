@@ -569,6 +569,9 @@ def _synthesis_escalation_reason(s: dict[str, Any]) -> str:
     if s.get("force_strong_synth"):
         return "forced_strong_synth"
 
+    if s.get("is_code_review"):
+        return "code_review"
+
     confidence = float(s.get("confidence", 0.0) or 0.0)
     if confidence < LOW_CONFIDENCE_THRESHOLD:
         return f"low_confidence:{confidence:.2f}"
