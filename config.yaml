@@ -187,8 +187,9 @@ deep_panel_local:
   code:
     workers:
       - "deepseek-r1:32b"
+      - "qwen3-coder-next:latest"
     synthesizer: "qwen3-coder-next:latest"
-    fallback_synthesizer: "qwen3-coder-next:latest"
+    fallback_synthesizer: "deepseek-r1:32b"
 
   reasoning:
     workers:
