@@ -501,7 +501,12 @@ Ranking rules (strict):
 Evidence policy (strict):
 - Include only findings that are grounded in concrete evidence from the drafts.
 - Do NOT invent imports, files, line references, runtime traces, or vulnerabilities.
-- For each critical/high finding, include: severity, concrete location (`path:line` when available, otherwise precise function/block name), failure mode, and fix.
+- For each critical/high finding, include exactly these fields:
+  `Location:`
+  `Evidence:` (an exact code snippet copied from the original code, wrapped in backticks)
+  `Failure mode:`
+  `Fix:`
+- If you cannot provide an exact `Evidence:` snippet from the original code, drop that finding.
 - Never mark an item Critical without deterministic impact (crash/data loss/corruption or concrete exploit path).
 - If evidence is insufficient for critical/high findings, state exactly: `No confirmed critical/high findings.`
 - Put uncertain ideas into `Open Questions / Unverified Risks`, not into critical/high findings.
@@ -532,6 +537,24 @@ _SYNTH_UNCERTAINTY_MARKERS = (
     "insufficient information",
     "unable to verify",
 )
+_REVIEW_SPECULATIVE_MARKERS = (
+    "might",
+    "may",
+    "could",
+    "likely",
+    "possibly",
+    "potential",
+    "appears to",
+    "seems",
+    "probably",
+)
+_REVIEW_SECTION_TITLE_RE = re.compile(
+    r"(?im)^(?:#+\s*)?(Findings \(Critical/High First\)|"
+    r"Open Questions / Unverified Risks|"
+    r"Low-Priority Suggestions|"
+    r"Recommended Next Step)\s*$"
+)
+_REVIEW_FINDING_START_RE = re.compile(r"(?m)^\s*\d+\.\s+")
 
 
 def _is_valid_worker_output(output: dict[str, Any]) -> bool:
@@ -612,6 +635,105 @@ def _has_uncertain_draft(worker_outputs: list[dict[str, Any]]) -> bool:
         if any(marker in text for marker in _SYNTH_UNCERTAINTY_MARKERS):
             return True
     return False
+
+
+def _review_section_bounds(text: str, title: str) -> tuple[int, int, int] | None:
+    matches = list(_REVIEW_SECTION_TITLE_RE.finditer(text))
+    if not matches:
+        return None
+    for i, m in enumerate(matches):
+        if m.group(1).strip().lower() != title.strip().lower():
+            continue
+        section_start = m.start()
+        body_start = m.end()
+        section_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        return section_start, body_start, section_end
+    return None
+
+
+def _split_numbered_findings(body: str) -> list[str]:
+    starts = [m.start() for m in _REVIEW_FINDING_START_RE.finditer(body)]
+    if not starts:
+        stripped = body.strip()
+        return [stripped] if stripped else []
+    blocks: list[str] = []
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(body)
+        chunk = body[start:end].strip()
+        if chunk:
+            blocks.append(chunk)
+    return blocks
+
+
+def _finding_has_supported_evidence(block: str, source_text: str) -> bool:
+    lowered = block.lower()
+    if any(marker in lowered for marker in _REVIEW_SPECULATIVE_MARKERS):
+        return False
+    required_fields = ("location:", "evidence:", "failure mode:", "fix:")
+    if not all(field in lowered for field in required_fields):
+        return False
+
+    evidence_line = re.search(r"(?im)^\s*evidence:\s*(.+)$", block)
+    if not evidence_line:
+        return False
+    evidence_raw = evidence_line.group(1).strip()
+    snippets = re.findall(r"`([^`]{3,200})`", evidence_raw)
+    if not snippets:
+        snippets = [evidence_raw.strip("`\"' ")]
+
+    source_lower = source_text.lower()
+    for snippet in snippets:
+        candidate = snippet.strip()
+        if len(candidate) < 3:
+            continue
+        if candidate.lower() in source_lower:
+            return True
+    return False
+
+
+def _enforce_review_evidence(result_text: str, *, source_text: str) -> str:
+    bounds = _review_section_bounds(result_text, "Findings (Critical/High First)")
+    if not bounds:
+        return result_text
+
+    section_start, body_start, section_end = bounds
+    findings_body = result_text[body_start:section_end]
+    if "no confirmed critical/high findings." in findings_body.lower():
+        return result_text
+
+    blocks = _split_numbered_findings(findings_body)
+    if not blocks:
+        replacement = "\nNo confirmed critical/high findings.\n"
+        return result_text[:body_start] + replacement + result_text[section_end:]
+
+    kept: list[str] = []
+    removed = 0
+    for block in blocks:
+        if _finding_has_supported_evidence(block, source_text):
+            kept.append(block)
+        else:
+            removed += 1
+
+    if not kept:
+        replacement = "\nNo confirmed critical/high findings.\n"
+        if removed:
+            logger.info(
+                "Review synthesis filter removed %d unsupported finding(s); no findings left",
+                removed,
+            )
+        return result_text[:body_start] + replacement + result_text[section_end:]
+
+    normalized: list[str] = []
+    for i, block in enumerate(kept, 1):
+        updated = re.sub(r"(?m)^\s*\d+\.\s+", f"{i}. ", block, count=1)
+        if not _REVIEW_FINDING_START_RE.search(updated[:20]):
+            updated = f"{i}. {updated.lstrip()}"
+        normalized.append(updated.strip())
+
+    replacement = "\n" + "\n\n".join(normalized) + "\n"
+    if removed:
+        logger.info("Review synthesis filter removed %d unsupported finding(s)", removed)
+    return result_text[:body_start] + replacement + result_text[section_end:]
 
 
 def _synthesis_escalation_reason(s: dict[str, Any]) -> str:
@@ -751,6 +873,9 @@ async def node_synthesize(s):
                 s["synthesis_messages"],
                 **model_call_kwargs(s, temperature=min(s["temperature"], 0.3)),
             )
+            if s.get("is_code_review"):
+                source = flatten_messages(s.get("original_messages", s["messages"]))
+                r = _enforce_review_evidence(r, source_text=source)
             s["result_text"] = r
             s["selected_model"] = sy
             s["prompt_tokens"] = estimate_tokens(flatten_messages(s["messages"]))
@@ -811,5 +936,4 @@ async def node_reflect_deep(s):
         return await node_synthesize(s)
 
     return s
-
 
