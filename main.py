@@ -210,7 +210,7 @@ async def _await_stream_stage(
     heartbeat_ticks = 0
     heartbeat_interval_s = STREAM_HEARTBEAT_SECONDS
     if heartbeat_style == "dots":
-        heartbeat_interval_s = 10
+        heartbeat_interval_s = 5
     logger.info(
         "Streaming stage started rid=%s stage=%s model=%s",
         request_id,

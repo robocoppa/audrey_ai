@@ -43,6 +43,13 @@ from ollama import run_model_once, run_model_with_tools_detailed
 
 logger = logging.getLogger("audrey.pipeline")
 _WORKER_ERROR_PREFIX = "[WORKER_ERROR]"
+_AUDREY_CODE_REVIEW_HINT_RE = re.compile(
+    r"\b(review|code review|audit|assess|assessment|evaluate|evaluation|critique|"
+    r"feedback|improve|improvement|recommendation|recommendations|any issues|"
+    r"any bugs|what's wrong|what is wrong|how does this look|clean up|"
+    r"refactor suggestions)\b",
+    re.I,
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -181,14 +188,18 @@ async def node_classify(s):
     requested = s["requested_model"]
 
     if requested == "audrey_code":
-        # Explicit code profile: bypass classifier ambiguity and force code panel.
+        # Explicit code profile: force code panel, but retain review intent.
+        review_hint_text = flatten_messages(s["messages"])
+        is_review = bool(_AUDREY_CODE_REVIEW_HINT_RE.search(review_hint_text))
         s.update(
             {
                 "task_type": "code",
                 "confidence": 1.0,
                 "needs_vision": False,
-                "is_code_review": False,
-                "route_reason": "forced:audrey_code",
+                "is_code_review": is_review,
+                "route_reason": (
+                    "forced:audrey_code:review" if is_review else "forced:audrey_code"
+                ),
             }
         )
         s["use_fast_path"] = False
@@ -444,7 +455,13 @@ Ranking rules (follow strictly):
 Do NOT lead with security checklist items unless the code has a genuine exploitable vulnerability with a concrete attack path. For local-first application code, bugs and behavior matter more than compliance.
 
 Do NOT mention model names, draft numbers, or that multiple sources were consulted.
-Be specific: cite the function or line, explain the concrete failure mode, and suggest a fix.
+Evidence policy (strict):
+- Include only findings that are grounded in concrete evidence from the drafts.
+- Do NOT invent imports, files, line references, runtime traces, or vulnerabilities.
+- For each critical/high finding, include a concrete location (`path:line` when available, otherwise precise function/block name), the failure mode, and a fix.
+- If evidence is insufficient for critical/high findings, state exactly: `No confirmed critical/high findings.`
+- Put uncertain ideas into `Open Questions / Unverified Risks`, not into critical/high findings.
+
 If drafts contradict on severity, favor the one that identifies a concrete failure scenario over the one that cites a generic best practice.
 Do NOT wrap your entire response in a code block or code fence. Use code fences only for actual code snippets. Output clean markdown directly."""
 

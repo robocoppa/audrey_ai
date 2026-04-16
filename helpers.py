@@ -343,8 +343,8 @@ def inject_datetime(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 _WSF = "\n\nStructure: ## Approach\n## Answer\n## Caveats\n"
 
 _WSF_REVIEW = (
-    "\n\nStructure: ## Key Issues (ranked by user impact)\n"
-    "## Detailed Findings\n## Minor / Low-Priority Notes\n"
+    "\n\nStructure: ## Findings (Critical/High First)\n"
+    "## Open Questions / Unverified Risks\n## Low-Priority Suggestions\n"
 )
 
 _CODE_REVIEW_BASE = (
@@ -355,8 +355,14 @@ _CODE_REVIEW_BASE = (
     "logging preferences, magic-number extraction) to a low-priority section unless "
     "no larger issues exist. For local-first application code, bugs and behavior "
     "matter more than compliance checklists.\n\n"
-    "Be specific: cite the function or line, explain the concrete failure mode, "
-    "and suggest a fix."
+    "Evidence rule: include only findings supported by concrete code evidence. "
+    "Do not invent files, imports, functions, runtime errors, or vulnerabilities.\n\n"
+    "For each critical/high finding, cite a concrete location (`path:line` when "
+    "available, otherwise precise function/block name), explain the failure mode, "
+    "and suggest a fix.\n\n"
+    "If the evidence is insufficient for critical/high issues, say exactly: "
+    "`No confirmed critical/high findings.` and move uncertain ideas to "
+    "`Open Questions / Unverified Risks`."
 )
 
 
