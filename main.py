@@ -208,6 +208,9 @@ async def _await_stream_stage(
 ) -> AsyncGenerator[tuple[str | None, Any], None]:
     started = time.monotonic()
     heartbeat_ticks = 0
+    heartbeat_interval_s = STREAM_HEARTBEAT_SECONDS
+    if heartbeat_style == "dots":
+        heartbeat_interval_s = 10
     logger.info(
         "Streaming stage started rid=%s stage=%s model=%s",
         request_id,
@@ -215,7 +218,7 @@ async def _await_stream_stage(
         model_name,
     )
 
-    if STREAM_HEARTBEAT_SECONDS <= 0:
+    if heartbeat_interval_s <= 0:
         result = await awaitable
         elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.info(
@@ -233,7 +236,7 @@ async def _await_stream_stage(
             try:
                 result = await asyncio.wait_for(
                     asyncio.shield(task),
-                    timeout=STREAM_HEARTBEAT_SECONDS,
+                    timeout=heartbeat_interval_s,
                 )
                 elapsed_ms = int((time.monotonic() - started) * 1000)
                 logger.info(
@@ -242,11 +245,13 @@ async def _await_stream_stage(
                     stage,
                     elapsed_ms,
                 )
+                if EMIT_STATUS_UPDATES and heartbeat_style == "dots":
+                    yield (_sc(rid, created, model_name, "\n"), _STREAM_STAGE_DONE)
                 yield None, result
                 return
             except asyncio.TimeoutError:
                 heartbeat_ticks += 1
-                elapsed_s = heartbeat_ticks * STREAM_HEARTBEAT_SECONDS
+                elapsed_s = heartbeat_ticks * heartbeat_interval_s
                 actual_elapsed_s = max(1, int(time.monotonic() - started))
                 logger.info(
                     "Streaming stage pending rid=%s stage=%s elapsed_s=%d displayed_s=%d",
@@ -274,11 +279,18 @@ async def _await_stream_stage(
                     )
                 if EMIT_STATUS_UPDATES:
                     should_emit_status = True
+                    if heartbeat_style == "dots":
+                        chunk_text = "."
+                        yield (
+                            _sc(rid, created, model_name, chunk_text),
+                            _STREAM_STAGE_DONE,
+                        )
+                        continue
                     if heartbeat_style == "append_seconds":
                         # Keep very long stages readable: first ping, then every ~2 min.
                         throttle_ticks = max(
                             1,
-                            120 // max(1, STREAM_HEARTBEAT_SECONDS),
+                            120 // max(1, heartbeat_interval_s),
                         )
                         should_emit_status = (
                             heartbeat_ticks == 1
@@ -1156,7 +1168,7 @@ async def chat_completions(req: ChatCompletionRequest):
                         rid,
                         ct,
                         req.model,
-                        f"🧠 Running worker models: {workers_text}\n",
+                        "🧠 Generating worker drafts",
                     )
                 if EMIT_ROUTING_BANNER and deep_workers:
                     yield _sc(
@@ -1174,8 +1186,8 @@ async def chat_completions(req: ChatCompletionRequest):
                     model_name=req.model,
                     request_id=request_id,
                     stage="parallel_generate",
-                    heartbeat_text="Still generating worker drafts",
-                    heartbeat_style="append_seconds",
+                    heartbeat_text="Generating worker drafts",
+                    heartbeat_style="dots",
                 ):
                     if chunk is not None:
                         yield chunk

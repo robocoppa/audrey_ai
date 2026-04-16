@@ -396,7 +396,7 @@ async def node_parallel_generate(s):
     if cloud_tasks and local_tasks:
         cr, lr = await asyncio.gather(
             asyncio.gather(*[one(w, t) for w, t in cloud_tasks]),
-            run_local(),
+            run_local(sequential=True),
         )
         outs = list(cr) + lr
     elif cloud_tasks:
