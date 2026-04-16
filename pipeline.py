@@ -442,27 +442,37 @@ Do NOT mention model names, draft numbers, or that multiple sources were consult
 Prefer correctness and clarity. Resolve any contradictions by favoring the more detailed answer.
 If drafts reference tool results or web search data, integrate that information naturally.
 If drafts address different sub-tasks of a complex question, combine them into a unified answer.
+Start with a direct answer first, then supporting detail.
 Do NOT wrap your entire response in a code block or code fence. Use code fences only for actual code snippets. Output clean markdown directly."""
 
 _SYNTH_SYS_REVIEW = """You are a synthesis model merging code review drafts into one clear report.
 
-Ranking rules (follow strictly):
-1. Behavior mismatches and correctness bugs come first — things that produce wrong results or crash at runtime.
-2. Logic errors, race conditions, data-loss risks, and missing error handling come next.
-3. Design issues (poor separation of concerns, tight coupling, missing abstractions) follow.
-4. Low-priority section at the end for: theoretical security hardening (timing attacks on localhost, magic-number extraction, structured-logging preferences), style nits, and naming suggestions.
+Required structure (use exactly these sections in order):
+1) `## Findings (Critical/High First)`
+2) `## Open Questions / Unverified Risks`
+3) `## Low-Priority Suggestions`
+4) `## Recommended Next Step`
 
-Do NOT lead with security checklist items unless the code has a genuine exploitable vulnerability with a concrete attack path. For local-first application code, bugs and behavior matter more than compliance.
+Ranking rules (strict):
+- Behavior mismatches and correctness bugs come first.
+- Logic errors, race conditions, data-loss risks, and missing error handling come next.
+- Design/maintainability concerns follow.
+- Theoretical hardening and style suggestions belong in low-priority.
 
-Do NOT mention model names, draft numbers, or that multiple sources were consulted.
 Evidence policy (strict):
 - Include only findings that are grounded in concrete evidence from the drafts.
 - Do NOT invent imports, files, line references, runtime traces, or vulnerabilities.
-- For each critical/high finding, include a concrete location (`path:line` when available, otherwise precise function/block name), the failure mode, and a fix.
+- For each critical/high finding, include: severity, concrete location (`path:line` when available, otherwise precise function/block name), failure mode, and fix.
+- Never mark an item Critical without deterministic impact (crash/data loss/corruption or concrete exploit path).
 - If evidence is insufficient for critical/high findings, state exactly: `No confirmed critical/high findings.`
 - Put uncertain ideas into `Open Questions / Unverified Risks`, not into critical/high findings.
 
-If drafts contradict on severity, favor the one that identifies a concrete failure scenario over the one that cites a generic best practice.
+Output quality rules:
+- Keep the report concise and high-signal (max 5 critical/high items).
+- Do NOT include broad refactor plans unless tied to a concrete observed problem.
+- Do NOT mention model names, draft numbers, or that multiple sources were consulted.
+- If drafts contradict on severity, favor the one with a concrete failure scenario over generic best practice advice.
+
 Do NOT wrap your entire response in a code block or code fence. Use code fences only for actual code snippets. Output clean markdown directly."""
 
 
@@ -664,7 +674,7 @@ def build_synth_msgs(s):
     secs = []
     for i, o in enumerate(outputs, 1):
         label = o.get("label", "")
-        secs.append(f"── Draft {i} ({o['model']}){label} ──\n{o['content']}")
+        secs.append(f"── Draft {i}{label} ──\n{o['content']}")
     return [
         {"role": "system", "content": sys_prompt},
         {
@@ -718,6 +728,7 @@ async def node_reflect_deep(s):
     reflection = await reflect_on_response(
         s.get("original_messages", s["messages"]),
         s["result_text"],
+        is_code_review=bool(s.get("is_code_review", False)),
     )
     s["reflection_result"] = reflection
 

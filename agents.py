@@ -133,17 +133,35 @@ Return strict JSON (no fences):
   "missing": "brief description of what's missing or empty string if complete"
 }"""
 
+_REFLECT_SYSTEM_REVIEW = """You are a code-review quality checker.
+Given the original request and a candidate review report, evaluate whether the report is accurate, evidence-based, and complete.
+
+Scoring rules:
+- Mark quality as "poor" if critical/high findings are speculative, missing concrete locations, or stated without evidence.
+- Mark quality as "poor" if the report sounds like a generic checklist rather than code-grounded findings.
+- Mark quality as "partial" when mostly correct but missing key requested coverage or clear prioritization.
+- Mark quality as "good" only when findings are concrete, prioritized, and actionable.
+
+Return strict JSON (no fences):
+{
+  "complete": true/false,
+  "quality": "good" | "partial" | "poor",
+  "missing": "brief description of what is missing, speculative, or unsupported; empty string if complete"
+}"""
+
 
 async def reflect_on_response(
     original_msgs: list[dict[str, Any]],
     response_text: str,
+    *,
+    is_code_review: bool = False,
 ) -> dict[str, Any]:
     """Use the router model to check if the response adequately answers the question."""
     if not REFLECTION_ENABLED:
         return {"complete": True, "quality": "good", "missing": ""}
 
     # Don't reflect on very long responses — they're almost certainly substantive
-    if len(response_text) > 3000:
+    if len(response_text) > 3000 and not is_code_review:
         return {"complete": True, "quality": "good", "missing": ""}
 
     try:
@@ -151,20 +169,23 @@ async def reflect_on_response(
         if not question:
             return {"complete": True, "quality": "good", "missing": ""}
 
+        reflect_system = _REFLECT_SYSTEM_REVIEW if is_code_review else _REFLECT_SYSTEM
+        answer_preview_limit = 2500 if is_code_review else 1500
+        reflect_max_tokens = 220 if is_code_review else 150
         raw = await run_model_once(
             ROUTER_MODEL,
             [
-                {"role": "system", "content": _REFLECT_SYSTEM},
+                {"role": "system", "content": reflect_system},
                 {
                     "role": "user",
                     "content": (
                         f"Question:\n{question[:500]}\n\n"
-                        f"Answer:\n{response_text[:1500]}"
+                        f"Answer:\n{response_text[:answer_preview_limit]}"
                     ),
                 },
             ],
             temperature=0.0,
-            max_tokens=150,
+            max_tokens=reflect_max_tokens,
             top_p=0.9,
             stop=None,
         )
@@ -371,6 +392,7 @@ async def adaptive_escalate(s: dict[str, Any]) -> dict[str, Any]:
         reflection = await reflect_on_response(
             s.get("original_messages", s["messages"]),
             result,
+            is_code_review=bool(s.get("is_code_review", False)),
         )
         s["reflection_result"] = reflection
 
