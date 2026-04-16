@@ -3,7 +3,7 @@
 # Priority determines selection order; speed/quality are informational.
 #
 # Removed: llama4:latest (67GB, can't coexist), gemma4:31b (redundant),
-#          qwen2.5-coder:32b (covered by qwen3-coder-next + devstral),
+#          qwen2.5-coder:32b (covered by qwen3-coder-next),
 #          qwen3-vl:32b (llava:34b + kimi-k2.5:cloud cover VL),
 #          deepseek-coder-v2:16b (redundant, lowest-priority code worker),
 #          olmo-3.1:32b (lowest quality local model, no unique role)
@@ -25,10 +25,6 @@ model_registry:
       priority: 10
       speed: 8
       quality: 8
-    - name: "devstral-small-2:latest"
-      priority: 7
-      speed: 9
-      quality: 7
   reasoning:
     - name: "qwen3.5:397b-cloud"
       priority: 14
@@ -123,7 +119,6 @@ fast_path:
     - "nemotron-3-super:cloud"
     # Local models (only the most reliable at tool calling)
     - "qwen3.5:35b-a3b"
-    - "devstral-small-2:latest"
 
 # ─── Deep Panel (auto — mixed cloud + local workers) ───
 deep_panel:
@@ -196,7 +191,6 @@ deep_panel_local:
   code:
     workers:
       - "qwen3-coder-next:latest"
-      - "devstral-small-2:latest"
     synthesizer: "qwen3.5:35b-a3b"
     fallback_synthesizer: "qwen3.5:35b-a3b"
 
@@ -225,7 +219,6 @@ deep_panel_code:
   code:
     workers:
       - "qwen3-coder-next:latest"
-      - "devstral-small-2:latest"
       - "deepseek-v3.2:cloud"
       - "qwen3.5:397b-cloud"
     synthesizer: "qwen3.5:35b-a3b"
@@ -234,7 +227,6 @@ deep_panel_code:
   reasoning:
     workers:
       - "qwen3-coder-next:latest"
-      - "devstral-small-2:latest"
       - "deepseek-v3.2:cloud"
       - "qwen3.5:397b-cloud"
     synthesizer: "qwen3.5:35b-a3b"
@@ -243,7 +235,6 @@ deep_panel_code:
   vl:
     workers:
       - "qwen3-coder-next:latest"
-      - "devstral-small-2:latest"
       - "deepseek-v3.2:cloud"
       - "qwen3.5:397b-cloud"
     synthesizer: "qwen3.5:35b-a3b"
@@ -252,7 +243,6 @@ deep_panel_code:
   general:
     workers:
       - "qwen3-coder-next:latest"
-      - "devstral-small-2:latest"
       - "deepseek-v3.2:cloud"
       - "qwen3.5:397b-cloud"
     synthesizer: "qwen3.5:35b-a3b"
