@@ -131,8 +131,7 @@ _GP = [
     re.compile(r"^(translate|summarize|summarise|paraphrase|rewrite|rephrase)\b", re.I),
 ]
 
-# Review / analysis override — reclassify code → reasoning when the user's
-# actual intent is asking for review, suggestions, or analysis of code.
+# Review / analysis detection for code-review intent.
 # EXPANDED: added "assess", "assessment", lone "look at/over", "check",
 # "what can be improved", and phrasing without leading verbs.
 _REVIEW_OVERRIDE = re.compile(
@@ -169,11 +168,11 @@ def keyword_prefilter(text: str, *, user_text: str | None = None) -> dict[str, A
         if p.search(text):
             if is_review_request:
                 return {
-                    "task_type": "reasoning",
-                    "confidence": 0.85,
+                    "task_type": "code",
+                    "confidence": 0.90,
                     "needs_vision": False,
                     "is_code_review": True,
-                    "route_reason": "keyword: code+review → reasoning",
+                    "route_reason": "keyword: code+review",
                 }
             return {
                 "task_type": "code",
@@ -187,11 +186,11 @@ def keyword_prefilter(text: str, *, user_text: str | None = None) -> dict[str, A
     if len(w) >= 2:
         if is_review_request:
             return {
-                "task_type": "reasoning",
-                "confidence": 0.82,
+                "task_type": "code",
+                "confidence": 0.85,
                 "needs_vision": False,
                 "is_code_review": True,
-                "route_reason": f"keyword: weak code (x{len(w)})+review → reasoning",
+                "route_reason": f"keyword: weak code (x{len(w)})+review",
             }
         return {
             "task_type": "code",
@@ -425,17 +424,16 @@ async def classify_request(msgs: list[dict[str, Any]]) -> dict[str, Any]:
                 tt = p.get("task_type", "general")
                 if tt not in {"code", "reasoning", "vl", "general"}:
                     tt = "general"
-                # If the router classifies as code but user wants review,
-                # override to reasoning + flag as code review
+                # Keep code reviews as task_type=code, but still mark review intent.
                 code_review = False
+                strong_code = any(p.search(user_text or flat) for p in _CS)
+                weak_code_count = len([p for p in _CW if p.search(user_text or flat)])
+                has_code_signals = strong_code or weak_code_count >= 2
                 if is_review and tt == "code":
-                    tt = "reasoning"
                     code_review = True
-                elif is_review and tt == "reasoning":
-                    # Router already said reasoning; still flag as code review
-                    # if code signals are present in the input
-                    if any(p.search(user_text or flat) for p in _CS):
-                        code_review = True
+                elif is_review and tt == "reasoning" and has_code_signals:
+                    tt = "code"
+                    code_review = True
                 return {
                     "task_type": tt,
                     "confidence": max(0.0, min(float(p.get("confidence", 0.5)), 1.0)),
@@ -453,12 +451,14 @@ async def classify_request(msgs: list[dict[str, Any]]) -> dict[str, Any]:
     # Both attempts failed — keyword fallback
     fallback = _keyword_fallback_classify(user_text or flat)
     fallback.setdefault("is_code_review", False)
-    # Check if this is a code review even through the fallback path
+    # Keep code reviews as task_type=code through the fallback path too.
     if is_review and fallback["task_type"] in ("code", "reasoning"):
-        if any(p.search(user_text or flat) for p in _CS):
+        strong_code = any(p.search(user_text or flat) for p in _CS)
+        weak_code_count = len([p for p in _CW if p.search(user_text or flat)])
+        has_code_signals = strong_code or weak_code_count >= 2
+        if has_code_signals:
             fallback["is_code_review"] = True
-            if fallback["task_type"] == "code":
-                fallback["task_type"] = "reasoning"
+            fallback["task_type"] = "code"
     logger.info(
         "Router exhausted — keyword fallback: type=%s conf=%.2f reason=%s",
         fallback["task_type"],
