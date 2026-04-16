@@ -790,12 +790,12 @@ async def run_graph_dispatch(req) -> dict[str, Any]:
 # ── SSE stage-to-UX mapping ──────────────────────────────────────────────────
 
 _STAGE_STATUS: dict[str, tuple[str, str, str]] = {
-    "starting:classify":           ("🧭 Routing request...\n", "classify", "line"),
-    "starting:fast_react":         ("", "fast_react", "line"),
-    "starting:plan":               ("📋 Planning approach...\n", "plan", "line"),
+    "starting:classify":           ("🧭 Routing request...\n", "classify", "dots"),
+    "starting:fast_react":         ("", "fast_react", "dots"),
+    "starting:plan":               ("📋 Planning approach...\n", "plan", "dots"),
     "starting:generate":           ("🧠 Generating worker drafts", "parallel_generate", "dots"),
-    "starting:prepare_synthesis":  ("🧩 Preparing synthesis...\n", "prepare_synthesis", "line"),
-    "starting:synthesize":         ("", "synthesize", "line"),
+    "starting:prepare_synthesis":  ("🧩 Preparing synthesis...\n", "prepare_synthesis", "dots"),
+    "starting:synthesize":         ("", "synthesize", "dots"),
 }
 
 
@@ -899,7 +899,7 @@ async def chat_completions(req: ChatCompletionRequest):
                     # ── Before each stage: emit status, set up heartbeat ──
                     if stage_name.startswith("starting:"):
                         status_text, hb_stage, hb_style = _STAGE_STATUS.get(
-                            stage_name, ("", stage_name.split(":", 1)[1], "line"),
+                            stage_name, ("", stage_name.split(":", 1)[1], "dots"),
                         )
                         if status_text and EMIT_STATUS_UPDATES:
                             yield _sc(rid, ct, mn, status_text)
