@@ -33,6 +33,7 @@ from helpers import (
     ensure_state_defaults,
     estimate_tokens,
     flatten_messages,
+    get_last_user_text,
     inject_datetime,
     model_call_kwargs,
     role_prompt,
@@ -500,6 +501,8 @@ Ranking rules (strict):
 
 Evidence policy (strict):
 - Include only findings that are grounded in concrete evidence from the drafts.
+- Treat the latest user-provided code/message as the primary source of truth.
+- Ignore stale snippets from earlier conversation turns unless the latest user message explicitly says to review those older snippets.
 - Do NOT invent imports, files, line references, runtime traces, or vulnerabilities.
 - For each critical/high finding, include exactly these fields:
   `Location:`
@@ -555,6 +558,7 @@ _REVIEW_SECTION_TITLE_RE = re.compile(
     r"Recommended Next Step)\s*$"
 )
 _REVIEW_FINDING_START_RE = re.compile(r"(?m)^\s*\d+\.\s+")
+_REVIEW_CODE_BLOCK_RE = re.compile(r"```(?:[\w.+-]+)?\n(.*?)```", re.S)
 
 
 def _is_valid_worker_output(output: dict[str, Any]) -> bool:
@@ -684,7 +688,9 @@ def _finding_has_supported_evidence(block: str, source_text: str) -> bool:
     source_lower = source_text.lower()
     for snippet in snippets:
         candidate = snippet.strip()
-        if len(candidate) < 3:
+        if len(candidate) < 12:
+            continue
+        if not (re.search(r"[()\[\]{}=.:_]", candidate) or "\n" in candidate):
             continue
         if candidate.lower() in source_lower:
             return True
@@ -734,6 +740,30 @@ def _enforce_review_evidence(result_text: str, *, source_text: str) -> str:
     if removed:
         logger.info("Review synthesis filter removed %d unsupported finding(s)", removed)
     return result_text[:body_start] + replacement + result_text[section_end:]
+
+
+def _review_source_text(s: dict[str, Any]) -> str:
+    """Return the strict evidence source for code-review synthesis.
+
+    We intentionally prefer only the latest user-provided message/code blocks so
+    stale snippets from older turns do not validate fresh findings.
+    """
+    msgs = s.get("original_messages", s.get("messages", []))
+    if not isinstance(msgs, list) or not msgs:
+        return ""
+
+    latest_user = get_last_user_text(msgs).strip()
+    if not latest_user:
+        return ""
+
+    code_blocks = [
+        block.strip()
+        for block in _REVIEW_CODE_BLOCK_RE.findall(latest_user)
+        if block.strip()
+    ]
+    if code_blocks:
+        return "\n\n".join(code_blocks)
+    return latest_user
 
 
 def _synthesis_escalation_reason(s: dict[str, Any]) -> str:
@@ -874,7 +904,9 @@ async def node_synthesize(s):
                 **model_call_kwargs(s, temperature=min(s["temperature"], 0.3)),
             )
             if s.get("is_code_review"):
-                source = flatten_messages(s.get("original_messages", s["messages"]))
+                source = _review_source_text(s)
+                if not source:
+                    source = flatten_messages(s.get("original_messages", s["messages"]))
                 r = _enforce_review_evidence(r, source_text=source)
             s["result_text"] = r
             s["selected_model"] = sy
@@ -936,4 +968,3 @@ async def node_reflect_deep(s):
         return await node_synthesize(s)
 
     return s
-
