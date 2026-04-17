@@ -311,12 +311,22 @@ async def embed_text(text: str) -> list[float] | None:
         return None
 
 
+_embed_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_embed_semaphore() -> asyncio.Semaphore:
+    global _embed_semaphore
+    if _embed_semaphore is None:
+        _embed_semaphore = asyncio.Semaphore(EMBED_CONCURRENCY)
+    return _embed_semaphore
+
+
 async def embed_batch(texts: list[str]) -> list[list[float] | None]:
     """Embed multiple texts concurrently with bounded parallelism."""
-    semaphore = asyncio.Semaphore(EMBED_CONCURRENCY)
+    sem = _get_embed_semaphore()
 
     async def _embed_with_limit(text: str) -> list[float] | None:
-        async with semaphore:
+        async with sem:
             return await embed_text(text)
 
     return list(await asyncio.gather(*[_embed_with_limit(t) for t in texts]))
@@ -400,18 +410,14 @@ def _init_db():
 def _mark_stale_embeddings():
     """Null out embeddings created by a different model so they get re-embedded."""
     conn = _get_db()
-    stale = conn.execute(
-        "SELECT COUNT(*) as c FROM chunks "
+    conn.execute(
+        "UPDATE chunks SET embedding = NULL, embed_model = NULL "
         "WHERE embedding IS NOT NULL AND (embed_model IS NULL OR embed_model != ?)",
         (EMBEDDING_MODEL,),
-    ).fetchone()["c"]
+    )
+    stale = conn.total_changes
     if stale > 0:
-        logger.info("Marking %d chunks as stale (model changed to %s)", stale, EMBEDDING_MODEL)
-        conn.execute(
-            "UPDATE chunks SET embedding = NULL, embed_model = NULL "
-            "WHERE embedding IS NOT NULL AND (embed_model IS NULL OR embed_model != ?)",
-            (EMBEDDING_MODEL,),
-        )
+        logger.info("Marked %d chunks as stale (model changed to %s)", stale, EMBEDDING_MODEL)
         conn.commit()
     conn.close()
 
@@ -571,17 +577,17 @@ async def _background_scan():
 
             # Re-embed chunks with stale/missing embeddings
             batch_size = 100
-            offset = 0
             _ingest_status["phase"] = "re_embedding"
             while True:
                 stale_chunks = conn.execute(
                     "SELECT c.id, c.content FROM chunks c "
-                    "WHERE c.embedding IS NULL LIMIT ? OFFSET ?",
-                    (batch_size, offset),
+                    "WHERE c.embedding IS NULL LIMIT ?",
+                    (batch_size,),
                 ).fetchall()
                 if not stale_chunks:
                     break
                 logger.info("Re-embedding batch of %d stale chunks", len(stale_chunks))
+                successes = 0
                 for chunk_row in stale_chunks:
                     vec = await embed_text(chunk_row["content"])
                     if vec:
@@ -589,9 +595,12 @@ async def _background_scan():
                             "UPDATE chunks SET embedding = ?, embed_model = ? WHERE id = ?",
                             (_pack_embedding(vec), EMBEDDING_MODEL, chunk_row["id"]),
                         )
+                        successes += 1
                     await asyncio.sleep(0)
                 conn.commit()
-                offset += batch_size
+                if successes == 0:
+                    logger.warning("Re-embedding batch had 0 successes — embedding model may be unavailable, stopping")
+                    break
         finally:
             conn.close()
 
@@ -672,7 +681,8 @@ def _keyword_search(conn: sqlite3.Connection, query: str,
     words = query.strip().split()
     if not words:
         return []
-    fts_query = " OR ".join(f'"{w}"' for w in words)
+    # Escape double quotes inside words to prevent FTS5 syntax injection
+    fts_query = " OR ".join(f'"{w.replace(chr(34), chr(34)+chr(34))}"' for w in words)
 
     params: list[Any] = [fts_query]
     where_extra = ""
@@ -721,7 +731,11 @@ def _keyword_search(conn: sqlite3.Connection, query: str,
 def _semantic_search(conn: sqlite3.Connection, query_embedding: list[float],
                      collection: str | None, tags: str | None,
                      limit: int) -> list[dict[str, Any]]:
-    """Brute-force cosine similarity search over stored embeddings."""
+    """Cosine similarity search over stored embeddings.
+
+    Two-pass approach: score embeddings without loading content,
+    then fetch full metadata only for the top results.
+    """
     where_clauses = ["c.embedding IS NOT NULL"]
     params: list[Any] = []
 
@@ -737,19 +751,39 @@ def _semantic_search(conn: sqlite3.Connection, query_embedding: list[float],
 
     where_sql = " AND ".join(where_clauses)
 
+    # Pass 1: score embeddings without fetching content
     rows = conn.execute(f"""
-        SELECT c.id, c.chunk_index, c.content, c.embedding,
-               s.path, s.filename, s.collection, s.tags, s.chunk_count
+        SELECT c.id, c.embedding
         FROM chunks c
         JOIN sources s ON s.id = c.source_id
         WHERE {where_sql}
     """, params).fetchall()
 
-    scored = []
+    scored: list[tuple[int, float]] = []
     for row in rows:
         emb = _unpack_embedding(row["embedding"])
         sim = _cosine_similarity(query_embedding, emb)
-        scored.append({
+        scored.append((row["id"], sim))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top_ids = scored[:limit]
+
+    if not top_ids:
+        return []
+
+    # Pass 2: fetch full metadata only for top results
+    placeholders = ",".join("?" for _ in top_ids)
+    id_to_score = {cid: score for cid, score in top_ids}
+    detail_rows = conn.execute(f"""
+        SELECT c.id, c.chunk_index, c.content,
+               s.path, s.filename, s.collection, s.tags, s.chunk_count
+        FROM chunks c
+        JOIN sources s ON s.id = c.source_id
+        WHERE c.id IN ({placeholders})
+    """, [cid for cid, _ in top_ids]).fetchall()
+
+    results = [
+        {
             "chunk_id": row["id"],
             "chunk_index": row["chunk_index"],
             "total_chunks": row["chunk_count"],
@@ -758,11 +792,12 @@ def _semantic_search(conn: sqlite3.Connection, query_embedding: list[float],
             "filename": row["filename"],
             "collection": row["collection"],
             "tags": row["tags"],
-            "semantic_score": sim,
-        })
-
-    scored.sort(key=lambda x: x["semantic_score"], reverse=True)
-    return scored[:limit]
+            "semantic_score": id_to_score[row["id"]],
+        }
+        for row in detail_rows
+    ]
+    results.sort(key=lambda x: x["semantic_score"], reverse=True)
+    return results
 
 
 def _merge_results(keyword_results: list[dict], semantic_results: list[dict],
@@ -853,7 +888,7 @@ async def ep_ingest_path(req: IngestPathRequest):
 
     # Safety: must be under KNOWLEDGE_ROOT
     kr = Path(KNOWLEDGE_ROOT).resolve()
-    if not str(target).startswith(str(kr)):
+    if not target.is_relative_to(kr):
         return {"error": f"Path must be under {KNOWLEDGE_ROOT}"}
 
     if not target.exists():
@@ -1050,6 +1085,7 @@ async def ep_delete_source(req: DeleteSourceRequest):
 async def health():
     """Health check — verifies DB is accessible, embedding model reachable, and returns stats."""
     result: dict[str, Any] = {"ok": True, "knowledge_root": KNOWLEDGE_ROOT}
+    conn = None
     try:
         conn = _get_db()
         src = conn.execute("SELECT COUNT(*) as c FROM sources").fetchone()["c"]
@@ -1057,7 +1093,6 @@ async def health():
         emb = conn.execute(
             "SELECT COUNT(*) as c FROM chunks WHERE embedding IS NOT NULL"
         ).fetchone()["c"]
-        conn.close()
         result.update({
             "indexed_sources": src,
             "indexed_chunks": chk,
@@ -1066,6 +1101,9 @@ async def health():
         })
     except Exception as e:
         result.update({"ok": False, "error": str(e)})
+    finally:
+        if conn:
+            conn.close()
 
     # Check if embedding model is reachable
     test_vec = await embed_text("test")
