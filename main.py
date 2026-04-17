@@ -283,6 +283,14 @@ def _format_worker_event(
     elif etype == "worker_finished":
         status = event.get("status", "success")
         ms = int(event.get("elapsed_ms", 0) or 0)
+        secs = f"{ms / 1000:.1f}s" if ms else ""
+        if EMIT_STATUS_UPDATES:
+            if status == "success":
+                chunks.append(_sc(rid, created, model_name, f"\n✓ {wn} finished ({secs})\n"))
+            else:
+                err = event.get("error", "")
+                detail = f": {err[:80]}" if err else ""
+                chunks.append(_sc(rid, created, model_name, f"\n✗ {wn} failed ({secs}){detail}\n"))
         if EMIT_TIMELINE_EVENTS:
             chunks.append(_sc_event(rid, created, model_name, {
                 "stage": "worker_finished",
