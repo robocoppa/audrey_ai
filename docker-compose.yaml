@@ -86,6 +86,29 @@ services:
     labels:
       - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/images/toolbox.png
 
+  # ── Knowledge server (document RAG) ──
+  knowledge-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.knowledge
+    container_name: knowledge-server
+    restart: unless-stopped
+    ports:
+      - "${KNOWLEDGE_PORT:-8002}:8002"
+    environment:
+      - KNOWLEDGE_ROOT=/knowledge
+      - KNOWLEDGE_DB=/app/data/knowledge.db
+      - CHUNK_SIZE=${CHUNK_SIZE:-3500}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-500}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - /mnt/user/knowledge:/knowledge:ro
+      - knowledge-data:/app/data
+    networks:
+      - ollama-net
+    labels:
+      - net.unraid.docker.icon=/mnt/user/appdata/audrey_ai/images/knowledge.png
+
 networks:
   ollama-net:
     external: true
@@ -93,3 +116,4 @@ networks:
 volumes:
   tools-data:
   tools-sandbox:
+  knowledge-data:

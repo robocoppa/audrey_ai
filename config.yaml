@@ -293,6 +293,7 @@ search:
 # ─── Tool Servers ───
 tool_servers:
   - "http://custom-tools:8001"
+  - "http://knowledge-server:8002"
 
 # ─── Tools ───
 tools:
