@@ -108,6 +108,8 @@ services:
       - VISION_PROMPT=${VISION_PROMPT:-}
       - AUTO_SCAN=${AUTO_SCAN:-true}
       - RESCAN_INTERVAL=${RESCAN_INTERVAL:-1800}
+      - INGEST_QUIET_START=${INGEST_QUIET_START:-20}
+      - INGEST_QUIET_END=${INGEST_QUIET_END:-7}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -55,6 +55,8 @@ VISION_PROMPT = os.getenv(
 
 AUTO_SCAN = os.getenv("AUTO_SCAN", "true").lower() in ("true", "1", "yes")
 RESCAN_INTERVAL = int(os.getenv("RESCAN_INTERVAL", "1800"))  # seconds, 0 = startup only
+INGEST_QUIET_START = int(os.getenv("INGEST_QUIET_START", "20"))  # hour (0-23), no new scans after this
+INGEST_QUIET_END = int(os.getenv("INGEST_QUIET_END", "7"))      # hour (0-23), scans resume after this
 
 # ── Globals ──────────────────────────────────────────────────────────────────
 
@@ -606,11 +608,27 @@ async def _background_scan():
         logger.info("Background scan complete in %.2fs", elapsed)
 
 
+def _in_quiet_hours() -> bool:
+    """Check if current local time is within the ingestion quiet window."""
+    hour = time.localtime().tm_hour
+    if INGEST_QUIET_START <= INGEST_QUIET_END:
+        return INGEST_QUIET_START <= hour < INGEST_QUIET_END
+    # Wraps midnight (e.g. 20:00 → 07:00)
+    return hour >= INGEST_QUIET_START or hour < INGEST_QUIET_END
+
+
 async def _periodic_scan():
     """Run background scan on startup, then repeat at RESCAN_INTERVAL."""
-    await _background_scan()
+    if _in_quiet_hours():
+        logger.info("Skipping startup scan — quiet hours (%02d:00–%02d:00)",
+                     INGEST_QUIET_START, INGEST_QUIET_END)
+    else:
+        await _background_scan()
     while RESCAN_INTERVAL > 0:
         await asyncio.sleep(RESCAN_INTERVAL)
+        if _in_quiet_hours():
+            logger.debug("Skipping periodic scan — quiet hours")
+            continue
         await _background_scan()
 
 
