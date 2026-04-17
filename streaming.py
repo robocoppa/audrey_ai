@@ -73,12 +73,27 @@ def banner(
     sel = s.get("selected_model") or s.get("synthesizer") or "?"
     path = "fast+react" if s.get("use_fast_path") else "deep"
     tags = []
+
+    # Show workers that contributed drafts
+    worker_outputs = s.get("worker_outputs", [])
+    error_count = s.get("worker_error_count", 0)
+    worker_models = []
+    for wo in worker_outputs:
+        m = str(wo.get("model", "")).strip()
+        if m and not str(wo.get("content", "")).startswith("[WORKER_ERROR]"):
+            worker_models.append(m)
+    if worker_models:
+        tags.append("✓ " + ", ".join(worker_models))
+    if error_count > 0:
+        tags.append(f"✗ {error_count} failed")
+
     run_name = str(running_model or "").strip()
     done_name = str(finished_model or "").strip()
     if run_name:
         tags.append(f"▶ {run_name}")
     if done_name:
-        tags.append(f"✓ {done_name}")
+        synth_tag = f"✓ synth:{done_name}"
+        tags.append(synth_tag)
 
     detail = f" | {' | '.join(tags)}" if tags else ""
 
