@@ -55,6 +55,7 @@ VISION_PROMPT = os.getenv(
 
 AUTO_SCAN = os.getenv("AUTO_SCAN", "true").lower() in ("true", "1", "yes")
 RESCAN_INTERVAL = int(os.getenv("RESCAN_INTERVAL", "1800"))  # seconds, 0 = startup only
+INGEST_CONCURRENCY = int(os.getenv("INGEST_CONCURRENCY", "4"))  # parallel file ingestions
 INGEST_QUIET_START = int(os.getenv("INGEST_QUIET_START", "20"))  # hour (0-23), no new scans after this
 INGEST_QUIET_END = int(os.getenv("INGEST_QUIET_END", "7"))      # hour (0-23), scans resume after this
 
@@ -355,6 +356,7 @@ def _init_db():
             checksum    TEXT NOT NULL,
             chunk_count INTEGER NOT NULL DEFAULT 0,
             file_size   INTEGER NOT NULL DEFAULT 0,
+            mtime       REAL NOT NULL DEFAULT 0,
             indexed_at  REAL NOT NULL
         );
 
@@ -403,6 +405,12 @@ def _init_db():
     except sqlite3.OperationalError:
         logger.info("Migrating DB: adding embed_model column to chunks")
         conn.execute("ALTER TABLE chunks ADD COLUMN embed_model TEXT")
+    # Migrate: add mtime column for fast change detection
+    try:
+        conn.execute("SELECT mtime FROM sources LIMIT 0")
+    except sqlite3.OperationalError:
+        logger.info("Migrating DB: adding mtime column to sources")
+        conn.execute("ALTER TABLE sources ADD COLUMN mtime REAL NOT NULL DEFAULT 0")
     conn.close()
     logger.info("Knowledge DB initialized at %s", KNOWLEDGE_DB)
 
@@ -441,7 +449,8 @@ def _infer_collection(rel_path: str) -> str:
 # ── Ingestion logic ──────────────────────────────────────────────────────────
 
 async def _ingest_single_file(conn: sqlite3.Connection, file_path: Path,
-                              collection: str | None, tags: str) -> dict[str, Any]:
+                              collection: str | None, tags: str,
+                              *, skip_mtime_check: bool = False) -> dict[str, Any]:
     """Ingest one file. Returns status dict."""
     if not file_path.exists():
         return {"path": str(file_path), "status": "not_found"}
@@ -450,14 +459,24 @@ async def _ingest_single_file(conn: sqlite3.Connection, file_path: Path,
     if not _is_ingestible(file_path):
         return {"path": str(file_path), "status": "skipped_unsupported"}
 
-    checksum = _file_checksum(file_path)
+    stat = file_path.stat()
+    cur_size = stat.st_size
+    cur_mtime = stat.st_mtime
 
-    # Check if already indexed with same checksum
+    # Fast pre-filter: skip checksum if mtime and size haven't changed
     row = conn.execute(
-        "SELECT id, checksum FROM sources WHERE path = ?",
+        "SELECT id, checksum, file_size, mtime FROM sources WHERE path = ?",
         (str(file_path),)
     ).fetchone()
+    if row and not skip_mtime_check:
+        if row["file_size"] == cur_size and row["mtime"] == cur_mtime:
+            return {"path": str(file_path), "status": "unchanged"}
+
+    # mtime/size changed (or new file) — verify with full checksum
+    checksum = _file_checksum(file_path)
     if row and row["checksum"] == checksum:
+        # Content identical, just update mtime so future checks are fast
+        conn.execute("UPDATE sources SET mtime = ? WHERE id = ?", (cur_mtime, row["id"]))
         return {"path": str(file_path), "status": "unchanged"}
 
     text = await extract_text(file_path)
@@ -485,10 +504,10 @@ async def _ingest_single_file(conn: sqlite3.Connection, file_path: Path,
 
     cur = conn.execute(
         """INSERT INTO sources (path, filename, collection, tags, checksum,
-                                chunk_count, file_size, indexed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                                chunk_count, file_size, mtime, indexed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (str(file_path), file_path.name, coll, tags, checksum,
-         len(chunks), file_path.stat().st_size, time.time())
+         len(chunks), cur_size, cur_mtime, time.time())
     )
     source_id = cur.lastrowid
 
@@ -540,8 +559,99 @@ class GetChunkRequest(BaseModel):
 
 # ── Background scan ─────────────────────────────────────────────────────────
 
+async def _prepare_file(file_path: Path) -> dict[str, Any] | None:
+    """Extract text and compute embeddings for one file (no DB access).
+
+    Returns a dict with everything needed to write to DB, or None if skipped.
+    """
+    try:
+        if not file_path.exists() or not file_path.is_file():
+            return None
+        stat = file_path.stat()
+        checksum = _file_checksum(file_path)
+
+        text = await extract_text(file_path)
+        if text is None or not text.strip():
+            return None
+
+        chunks = chunk_text(text)
+        embeddings = await embed_batch(chunks)
+
+        try:
+            rel = file_path.relative_to(KNOWLEDGE_ROOT)
+            rel_str = str(rel)
+        except ValueError:
+            rel_str = file_path.name
+        coll = _infer_collection(rel_str)
+
+        return {
+            "path": file_path,
+            "checksum": checksum,
+            "chunks": chunks,
+            "embeddings": embeddings,
+            "collection": coll,
+            "file_size": stat.st_size,
+            "mtime": stat.st_mtime,
+        }
+    except Exception as e:
+        logger.error("Prepare failed for %s: %s", file_path, e)
+        return None
+
+
+def _write_prepared(conn: sqlite3.Connection, prep: dict[str, Any]) -> dict[str, Any]:
+    """Write a prepared file result to the DB. Must be called sequentially."""
+    file_path = prep["path"]
+    checksum = prep["checksum"]
+    chunks = prep["chunks"]
+    embeddings = prep["embeddings"]
+
+    row = conn.execute(
+        "SELECT id, checksum FROM sources WHERE path = ?",
+        (str(file_path),)
+    ).fetchone()
+    if row and row["checksum"] == checksum:
+        conn.execute("UPDATE sources SET mtime = ? WHERE id = ?", (prep["mtime"], row["id"]))
+        return {"path": str(file_path), "status": "unchanged"}
+
+    if row:
+        conn.execute("DELETE FROM chunks WHERE source_id = ?", (row["id"],))
+        conn.execute("DELETE FROM sources WHERE id = ?", (row["id"],))
+
+    embedded_count = sum(1 for e in embeddings if e is not None)
+    cur = conn.execute(
+        """INSERT INTO sources (path, filename, collection, tags, checksum,
+                                chunk_count, file_size, mtime, indexed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (str(file_path), file_path.name, prep["collection"], "", checksum,
+         len(chunks), prep["file_size"], prep["mtime"], time.time())
+    )
+    source_id = cur.lastrowid
+    conn.executemany(
+        "INSERT INTO chunks (source_id, chunk_index, content, embedding, embed_model) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [
+            (source_id, i, chunk,
+             _pack_embedding(emb) if emb else None,
+             EMBEDDING_MODEL if emb else None)
+            for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
+        ]
+    )
+    return {
+        "path": str(file_path),
+        "status": "indexed",
+        "collection": prep["collection"],
+        "chunks": len(chunks),
+        "embedded": embedded_count,
+    }
+
+
 async def _background_scan():
-    """Scan KNOWLEDGE_ROOT and ingest new/changed files."""
+    """Scan KNOWLEDGE_ROOT and ingest new/changed files.
+
+    Uses mtime+size pre-filtering to skip unchanged files, then processes
+    changed files with concurrent text extraction and embedding (CPU/GPU
+    bound), writing results to DB sequentially (SQLite constraint).
+    """
     global _ingest_status
     _ingest_status["running"] = True
     _ingest_status["phase"] = "scanning"
@@ -556,24 +666,81 @@ async def _background_scan():
         ]
         _ingest_status["total_files"] = len(all_files)
         _ingest_status["processed_files"] = 0
-        _ingest_status["phase"] = "ingesting"
+        _ingest_status["phase"] = "filtering"
         logger.info("Background scan: found %d ingestible files", len(all_files))
 
+        # Fast mtime+size pre-filter to find files that actually need processing
         conn = _get_db()
         try:
+            # Build lookup of known files
+            known = {}
+            for row in conn.execute("SELECT path, file_size, mtime FROM sources"):
+                known[row["path"]] = (row["file_size"], row["mtime"])
+
+            needs_processing = []
             for f in all_files:
-                _ingest_status["current_file"] = str(f)
                 try:
-                    result = await _ingest_single_file(conn, f, None, "")
-                    if result.get("status") == "indexed":
-                        conn.commit()
-                        logger.info("Background indexed: %s (%d chunks)",
-                                    f.name, result.get("chunks", 0))
-                except Exception as e:
-                    _ingest_status["errors"].append({"file": str(f), "error": str(e)})
-                    logger.error("Background ingest error for %s: %s", f, e)
-                _ingest_status["processed_files"] += 1
-                await asyncio.sleep(0)
+                    stat = f.stat()
+                    prev = known.get(str(f))
+                    if prev and prev[0] == stat.st_size and prev[1] == stat.st_mtime:
+                        _ingest_status["processed_files"] += 1
+                        continue
+                except OSError:
+                    _ingest_status["processed_files"] += 1
+                    continue
+                needs_processing.append(f)
+
+            skipped = len(all_files) - len(needs_processing)
+            logger.info(
+                "Background scan: %d unchanged (skipped), %d to process",
+                skipped, len(needs_processing),
+            )
+
+            if not needs_processing:
+                logger.info("Background scan: nothing to do")
+                conn.close()
+                return
+
+            # Process files concurrently in batches, write to DB sequentially
+            _ingest_status["phase"] = "ingesting"
+            sem = asyncio.Semaphore(INGEST_CONCURRENCY)
+
+            async def _prepare_limited(f: Path) -> tuple[Path, dict[str, Any] | None]:
+                async with sem:
+                    result = await _prepare_file(f)
+                    return f, result
+
+            batch_size = INGEST_CONCURRENCY * 2
+            for i in range(0, len(needs_processing), batch_size):
+                batch = needs_processing[i:i + batch_size]
+                _ingest_status["current_file"] = f"batch {i // batch_size + 1} ({len(batch)} files)"
+
+                # Concurrent extraction + embedding
+                prepared = await asyncio.gather(
+                    *[_prepare_limited(f) for f in batch],
+                    return_exceptions=True,
+                )
+
+                # Sequential DB writes
+                for item in prepared:
+                    if isinstance(item, Exception):
+                        _ingest_status["errors"].append({"file": None, "error": str(item)})
+                        _ingest_status["processed_files"] += 1
+                        continue
+                    f, prep = item
+                    if prep is None:
+                        _ingest_status["processed_files"] += 1
+                        continue
+                    try:
+                        result = _write_prepared(conn, prep)
+                        if result.get("status") == "indexed":
+                            conn.commit()
+                            logger.info("Background indexed: %s (%d chunks)",
+                                        f.name, result.get("chunks", 0))
+                    except Exception as e:
+                        _ingest_status["errors"].append({"file": str(f), "error": str(e)})
+                        logger.error("Background ingest error for %s: %s", f, e)
+                    _ingest_status["processed_files"] += 1
 
             # Re-embed chunks with stale/missing embeddings
             batch_size = 100
@@ -588,15 +755,15 @@ async def _background_scan():
                     break
                 logger.info("Re-embedding batch of %d stale chunks", len(stale_chunks))
                 successes = 0
-                for chunk_row in stale_chunks:
-                    vec = await embed_text(chunk_row["content"])
+                texts = [row["content"] for row in stale_chunks]
+                vecs = await embed_batch(texts)
+                for chunk_row, vec in zip(stale_chunks, vecs):
                     if vec:
                         conn.execute(
                             "UPDATE chunks SET embedding = ?, embed_model = ? WHERE id = ?",
                             (_pack_embedding(vec), EMBEDDING_MODEL, chunk_row["id"]),
                         )
                         successes += 1
-                    await asyncio.sleep(0)
                 conn.commit()
                 if successes == 0:
                     logger.warning("Re-embedding batch had 0 successes — embedding model may be unavailable, stopping")
