@@ -273,8 +273,6 @@ def _format_worker_event(
     etype = event.get("type")
     wn = str(event.get("model", "?"))
     if etype == "worker_started":
-        if EMIT_STATUS_UPDATES:
-            chunks.append(_sc(rid, created, model_name, f"\n▶ Running: {wn}\n"))
         if EMIT_TIMELINE_EVENTS:
             chunks.append(_sc_event(rid, created, model_name, {
                 "stage": "worker_started",
@@ -285,13 +283,6 @@ def _format_worker_event(
     elif etype == "worker_finished":
         status = event.get("status", "success")
         ms = int(event.get("elapsed_ms", 0) or 0)
-        secs = ms / 1000.0
-        if EMIT_STATUS_UPDATES:
-            icon = "✅" if status == "success" else "⚠"
-            chunks.append(_sc(
-                rid, created, model_name,
-                f"{icon} Finished: {wn} ({secs:.1f}s)\n",
-            ))
         if EMIT_TIMELINE_EVENTS:
             chunks.append(_sc_event(rid, created, model_name, {
                 "stage": "worker_finished",
@@ -908,15 +899,10 @@ async def chat_completions(req: ChatCompletionRequest):
                             fm = str(s.get("fast_model", "")).strip()
                             if EMIT_STATUS_UPDATES and fm:
                                 yield _sc(rid, ct, mn, f"⚡ Running fast model: {fm} (tools/search)\n")
-                            if EMIT_ROUTING_BANNER and fm:
-                                yield _sc(rid, ct, mn, banner(s, running_model=fm))
 
                         if stage_name == "starting:generate":
-                            dw = [str(w).strip() for w in s.get("deep_workers", []) if str(w).strip()]
                             if s.get("sub_tasks") and EMIT_STATUS_UPDATES:
                                 yield _sc(rid, ct, mn, f"📋 Planning: {len(s['sub_tasks'])} sub-tasks\n")
-                            if EMIT_ROUTING_BANNER and dw:
-                                yield _sc(rid, ct, mn, banner(s, running_model=", ".join(dw)))
                             # Wire up a progress queue so workers can report
                             # started/finished events while running in parallel.
                             s["worker_progress_queue"] = asyncio.Queue()
@@ -997,14 +983,6 @@ async def chat_completions(req: ChatCompletionRequest):
                                    details={"outputs": len(s.get("worker_outputs", []))})
                         if evt:
                             yield evt
-                        fw = [str(o.get("model", "")).strip()
-                              for o in s.get("worker_outputs", [])
-                              if str(o.get("model", "")).strip()]
-                        fw_text = ", ".join(dict.fromkeys(fw)) or "none"
-                        if EMIT_STATUS_UPDATES:
-                            yield _sc(rid, ct, mn, f"\n✅ All workers finished: {fw_text}\n")
-                        if EMIT_ROUTING_BANNER and fw_text != "none":
-                            yield _sc(rid, ct, mn, banner(s, finished_model=fw_text))
 
                     # ── Deep: synthesis prepared ────────────────────
                     elif stage_name == "done:prepare_synthesis":

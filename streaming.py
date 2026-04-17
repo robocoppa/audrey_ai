@@ -69,58 +69,21 @@ def banner(
     running_model: str | None = None,
     finished_model: str | None = None,
 ) -> str:
-    """Build a compact, readable routing banner for the chat UI."""
+    """Build a concise routing banner for the chat UI."""
     sel = s.get("selected_model") or s.get("synthesizer") or "?"
     path = "fast+react" if s.get("use_fast_path") else "deep"
-    tt = s.get("task_type", "?")
-    conf = s.get("confidence", 0)
-
-    # ── Optional detail tags ──
     tags = []
-
-    if s.get("search_performed"):
-        sq = s.get("search_query", "")
-        if sq:
-            sq = sq[:40] + ("…" if len(sq) > 40 else "")
-            tags.append(f"🌐 search: {sq}")
-        else:
-            tags.append("🌐 search")
-
-    tools_log = s.get("tools_used", [])
-    if tools_log:
-        seen: dict[str, int] = {}
-        for t in tools_log:
-            raw_name = t.get("tool", "")
-            short = raw_name.split("__", 1)[-1] if "__" in raw_name else raw_name
-            seen[short] = seen.get(short, 0) + 1
-        parts = [f"{n}×{c}" if c > 1 else n for n, c in seen.items()]
-        tags.append(f"🔧 {', '.join(parts)}")
-
-    if s.get("react_rounds"):
-        tags.append(f"react×{s['react_rounds']}")
-
-    if s.get("sub_tasks"):
-        tags.append(f"planned ({len(s['sub_tasks'])} tasks)")
-
-    rr = s.get("reflection_result", {})
-    if rr.get("quality") and rr["quality"] != "good":
-        tags.append(f"refl: {rr['quality']}")
-
-    if s.get("escalated"):
-        tags.append("⬆ escalated")
-
     run_name = str(running_model or "").strip()
     done_name = str(finished_model or "").strip()
     if run_name:
-        tags.append(f"▶ running: {run_name}")
+        tags.append(f"▶ {run_name}")
     if done_name:
-        tags.append(f"✅ finished: {done_name}")
+        tags.append(f"✓ {done_name}")
 
     detail = f" | {' | '.join(tags)}" if tags else ""
 
     return (
-        f"[{s.get('requested_model')} → {sel} | {tt} "
-        f"| conf {conf:.2f} | {path}{detail}]\n"
+        f"[{s.get('requested_model')} → {sel} | {path}{detail}]\n"
     )
 
 
@@ -151,8 +114,6 @@ async def stream_fast_path(
 
     if EMIT_STATUS_UPDATES:
         yield _sc(sid, ct, mn, f"⚡ Running fast model: {model} (ReAct tools/search)\n\n")
-    if EMIT_ROUTING_BANNER:
-        yield _sc(sid, ct, mn, banner(s, running_model=model))
 
     sys_msg = {
         "role": "system",
@@ -219,22 +180,9 @@ async def stream_synthesis(
         fb = str(ps.get("fallback_synthesizer", "")).strip()
         synth_candidates = [m for m in [sy, fb] if m]
     current_synth = synth_candidates[0] if synth_candidates else "?"
-    ws = ps.get("deep_workers", [])
-    sub_tasks = ps.get("sub_tasks")
 
     if EMIT_STATUS_UPDATES:
-        yield _sc(sid, ct, mn, f"🧠 Drafts from {len(ws)} models ({', '.join(ws)})\n")
-        if sub_tasks:
-            yield _sc(sid, ct, mn, f"📋 Planned: {len(sub_tasks)} sub-tasks\n")
-        if ps.get("search_performed"):
-            search_query = str(ps.get("search_query", "")).strip()
-            if search_query:
-                yield _sc(sid, ct, mn, f"🌐 Web search used: {search_query}\n")
-            else:
-                yield _sc(sid, ct, mn, "🌐 Web search used\n")
-        yield _sc(sid, ct, mn, f"✨ Running synthesis model: {current_synth}...\n\n---\n\n")
-    if EMIT_ROUTING_BANNER:
-        yield _sc(sid, ct, mn, banner(ps, running_model=current_synth))
+        yield _sc(sid, ct, mn, f"🧠 Synthesizing with {current_synth}...\n\n---\n\n")
 
     for i, synth in enumerate(synth_candidates):
         try:
@@ -262,8 +210,6 @@ async def stream_synthesis(
             if EMIT_STATUS_UPDATES and i < len(synth_candidates) - 1:
                 nxt = synth_candidates[i + 1]
                 yield _sc(sid, ct, mn, f"\n[Retrying synthesis with {nxt}]\n\n")
-                if EMIT_ROUTING_BANNER:
-                    yield _sc(sid, ct, mn, banner(ps, running_model=nxt))
 
     yield _sc(sid, ct, mn, "[Error. Please try again.]")
     yield _sc_stop(sid, ct, mn)
