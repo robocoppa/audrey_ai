@@ -2,20 +2,24 @@
 Knowledge server — local document RAG for Audrey.
 
 A standalone FastAPI service that ingests files from a knowledge directory,
-chunks and indexes them with SQLite FTS5, and exposes search endpoints
-that Audrey discovers via OpenAPI.
+chunks and indexes them with SQLite FTS5 + vector embeddings, and exposes
+hybrid search endpoints that Audrey discovers via OpenAPI.
 
 Run:  uvicorn knowledge_server:app --host 0.0.0.0 --port 8002
 """
 
 import hashlib
 import logging
+import math
 import os
 import sqlite3
+import struct
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
@@ -30,6 +34,14 @@ KNOWLEDGE_DB = os.getenv("KNOWLEDGE_DB", "/app/data/knowledge.db")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "3500"))        # chars (~900 tokens)
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "500"))   # chars (~130 tokens)
 MAX_RESULT_CHUNKS = int(os.getenv("MAX_RESULT_CHUNKS", "10"))
+
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+
+# ── Globals ──────────────────────────────────────────────────────────────────
+
+_http_session: aiohttp.ClientSession | None = None
+_embedding_dim: int | None = None  # detected on first embed call
 
 # ── Text extraction ──────────────────────────────────────────────────────────
 
@@ -107,6 +119,67 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE,
     return chunks
 
 
+# ── Embeddings ───────────────────────────────────────────────────────────────
+
+def _pack_embedding(vec: list[float]) -> bytes:
+    """Pack a float list into a compact binary blob (float32)."""
+    return struct.pack(f"{len(vec)}f", *vec)
+
+
+def _unpack_embedding(blob: bytes) -> list[float]:
+    """Unpack a binary blob back into a float list."""
+    n = len(blob) // 4
+    return list(struct.unpack(f"{n}f", blob))
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors. Pure Python, no numpy."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+async def embed_text(text: str) -> list[float] | None:
+    """Get embedding vector from Ollama. Returns None on failure."""
+    global _embedding_dim
+    if _http_session is None:
+        return None
+    try:
+        async with _http_session.post(
+            f"{OLLAMA_BASE_URL}/api/embed",
+            json={"model": EMBEDDING_MODEL, "input": text},
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            if resp.status != 200:
+                logger.warning("Embedding request failed: %d", resp.status)
+                return None
+            data = await resp.json()
+            embeddings = data.get("embeddings")
+            if embeddings and len(embeddings) > 0:
+                vec = embeddings[0]
+                if _embedding_dim is None:
+                    _embedding_dim = len(vec)
+                    logger.info("Embedding dimension detected: %d", _embedding_dim)
+                return vec
+            return None
+    except Exception as e:
+        logger.warning("Embedding failed: %s", e)
+        return None
+
+
+async def embed_batch(texts: list[str]) -> list[list[float] | None]:
+    """Embed multiple texts. Calls Ollama once per text (Ollama /api/embed
+    supports single input). Returns list aligned with input."""
+    results = []
+    for text in texts:
+        vec = await embed_text(text)
+        results.append(vec)
+    return results
+
+
 # ── Database ─────────────────────────────────────────────────────────────────
 
 def _get_db() -> sqlite3.Connection:
@@ -137,6 +210,7 @@ def _init_db():
             source_id   INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
             chunk_index INTEGER NOT NULL,
             content     TEXT NOT NULL,
+            embedding   BLOB,
             UNIQUE(source_id, chunk_index)
         );
 
@@ -164,6 +238,12 @@ def _init_db():
             INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
         END;
     """)
+    # Migrate: add embedding column if upgrading from Phase 1
+    try:
+        conn.execute("SELECT embedding FROM chunks LIMIT 0")
+    except sqlite3.OperationalError:
+        logger.info("Migrating DB: adding embedding column to chunks")
+        conn.execute("ALTER TABLE chunks ADD COLUMN embedding BLOB")
     conn.close()
     logger.info("Knowledge DB initialized at %s", KNOWLEDGE_DB)
 
@@ -186,8 +266,8 @@ def _infer_collection(rel_path: str) -> str:
 
 # ── Ingestion logic ──────────────────────────────────────────────────────────
 
-def _ingest_single_file(conn: sqlite3.Connection, file_path: Path,
-                        collection: str | None, tags: str) -> dict[str, Any]:
+async def _ingest_single_file(conn: sqlite3.Connection, file_path: Path,
+                              collection: str | None, tags: str) -> dict[str, Any]:
     """Ingest one file. Returns status dict."""
     if not file_path.exists():
         return {"path": str(file_path), "status": "not_found"}
@@ -209,6 +289,10 @@ def _ingest_single_file(conn: sqlite3.Connection, file_path: Path,
         return {"path": str(file_path), "status": "unsupported_or_empty"}
 
     chunks = chunk_text(text)
+
+    # Embed all chunks
+    embeddings = await embed_batch(chunks)
+    embedded_count = sum(1 for e in embeddings if e is not None)
 
     # Resolve collection
     try:
@@ -232,17 +316,21 @@ def _ingest_single_file(conn: sqlite3.Connection, file_path: Path,
     )
     source_id = cur.lastrowid
 
-    for i, chunk in enumerate(chunks):
-        conn.execute(
-            "INSERT INTO chunks (source_id, chunk_index, content) VALUES (?, ?, ?)",
-            (source_id, i, chunk)
-        )
+    conn.executemany(
+        "INSERT INTO chunks (source_id, chunk_index, content, embedding) VALUES (?, ?, ?, ?)",
+        [
+            (source_id, i, chunk,
+             _pack_embedding(emb) if emb else None)
+            for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
+        ]
+    )
 
     return {
         "path": str(file_path),
         "status": "indexed",
         "collection": coll,
         "chunks": len(chunks),
+        "embedded": embedded_count,
     }
 
 
@@ -260,6 +348,8 @@ class SearchRequest(BaseModel):
     collection: str | None = Field(None, description="Filter to a specific collection")
     top_k: int = Field(5, description="Number of results to return", ge=1, le=50)
     tags: str | None = Field(None, description="Comma-separated tags to filter by")
+    semantic_weight: float = Field(0.5, description="Weight for semantic/embedding search (0-1)", ge=0, le=1)
+    keyword_weight: float = Field(0.5, description="Weight for keyword/BM25 search (0-1)", ge=0, le=1)
 
 
 class DeleteSourceRequest(BaseModel):
@@ -272,23 +362,193 @@ class GetChunkRequest(BaseModel):
 
 # ── App ──────────────────────────────────────────────────────────────────────
 
-from contextlib import asynccontextmanager
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _http_session
     _init_db()
-    logger.info("Knowledge server ready  root=%s  db=%s", KNOWLEDGE_ROOT, KNOWLEDGE_DB)
+    _http_session = aiohttp.ClientSession()
+    logger.info("Knowledge server ready  root=%s  db=%s  embedding_model=%s",
+                KNOWLEDGE_ROOT, KNOWLEDGE_DB, EMBEDDING_MODEL)
     yield
+    await _http_session.close()
 
 
 app = FastAPI(
     title="Knowledge Server",
-    version="1.0.0",
-    description="Local document knowledge base: ingest files, search by keyword (FTS5). "
+    version="2.0.0",
+    description="Local document knowledge base with hybrid keyword + semantic search. "
                 "Designed as a tool server for Audrey.",
     lifespan=lifespan,
 )
+
+
+# ── Search helpers ───────────────────────────────────────────────────────────
+
+def _keyword_search(conn: sqlite3.Connection, query: str,
+                    collection: str | None, tags: str | None,
+                    limit: int) -> list[dict[str, Any]]:
+    """Run FTS5 keyword search. Returns ranked results."""
+    words = query.strip().split()
+    if not words:
+        return []
+    fts_query = " OR ".join(f'"{w}"' for w in words)
+
+    params: list[Any] = [fts_query]
+    where_extra = ""
+
+    if collection:
+        where_extra += " AND s.collection = ?"
+        params.append(collection)
+    if tags:
+        for tag in tags.split(","):
+            tag = tag.strip()
+            if tag:
+                where_extra += " AND s.tags LIKE ?"
+                params.append(f"%{tag}%")
+
+    params.append(limit)
+
+    rows = conn.execute(f"""
+        SELECT c.id, c.chunk_index, c.content,
+               s.path, s.filename, s.collection, s.tags, s.chunk_count,
+               rank
+        FROM chunks_fts f
+        JOIN chunks c ON c.id = f.rowid
+        JOIN sources s ON s.id = c.source_id
+        WHERE chunks_fts MATCH ?
+        {where_extra}
+        ORDER BY rank
+        LIMIT ?
+    """, params).fetchall()
+
+    return [
+        {
+            "chunk_id": row["id"],
+            "chunk_index": row["chunk_index"],
+            "total_chunks": row["chunk_count"],
+            "content": row["content"],
+            "source_path": row["path"],
+            "filename": row["filename"],
+            "collection": row["collection"],
+            "tags": row["tags"],
+            "keyword_score": -row["rank"],  # FTS5 rank is negative (lower=better)
+        }
+        for row in rows
+    ]
+
+
+def _semantic_search(conn: sqlite3.Connection, query_embedding: list[float],
+                     collection: str | None, tags: str | None,
+                     limit: int) -> list[dict[str, Any]]:
+    """Brute-force cosine similarity search over stored embeddings."""
+    where_clauses = ["c.embedding IS NOT NULL"]
+    params: list[Any] = []
+
+    if collection:
+        where_clauses.append("s.collection = ?")
+        params.append(collection)
+    if tags:
+        for tag in tags.split(","):
+            tag = tag.strip()
+            if tag:
+                where_clauses.append("s.tags LIKE ?")
+                params.append(f"%{tag}%")
+
+    where_sql = " AND ".join(where_clauses)
+
+    rows = conn.execute(f"""
+        SELECT c.id, c.chunk_index, c.content, c.embedding,
+               s.path, s.filename, s.collection, s.tags, s.chunk_count
+        FROM chunks c
+        JOIN sources s ON s.id = c.source_id
+        WHERE {where_sql}
+    """, params).fetchall()
+
+    scored = []
+    for row in rows:
+        emb = _unpack_embedding(row["embedding"])
+        sim = _cosine_similarity(query_embedding, emb)
+        scored.append({
+            "chunk_id": row["id"],
+            "chunk_index": row["chunk_index"],
+            "total_chunks": row["chunk_count"],
+            "content": row["content"],
+            "source_path": row["path"],
+            "filename": row["filename"],
+            "collection": row["collection"],
+            "tags": row["tags"],
+            "semantic_score": sim,
+        })
+
+    scored.sort(key=lambda x: x["semantic_score"], reverse=True)
+    return scored[:limit]
+
+
+def _merge_results(keyword_results: list[dict], semantic_results: list[dict],
+                   keyword_weight: float, semantic_weight: float,
+                   top_k: int) -> list[dict]:
+    """Merge keyword and semantic results with weighted scoring."""
+    # Normalize scores to 0-1 range within each result set
+    if keyword_results:
+        max_kw = max(r["keyword_score"] for r in keyword_results)
+        min_kw = min(r["keyword_score"] for r in keyword_results)
+        rng = max_kw - min_kw if max_kw != min_kw else 1.0
+        for r in keyword_results:
+            r["keyword_norm"] = (r["keyword_score"] - min_kw) / rng
+
+    if semantic_results:
+        max_sem = max(r["semantic_score"] for r in semantic_results)
+        min_sem = min(r["semantic_score"] for r in semantic_results)
+        rng = max_sem - min_sem if max_sem != min_sem else 1.0
+        for r in semantic_results:
+            r["semantic_norm"] = (r["semantic_score"] - min_sem) / rng
+
+    # Merge into a single dict keyed by chunk_id
+    merged: dict[int, dict] = {}
+
+    for r in keyword_results:
+        cid = r["chunk_id"]
+        merged[cid] = {
+            **r,
+            "keyword_norm": r.get("keyword_norm", 0),
+            "semantic_norm": 0,
+        }
+
+    for r in semantic_results:
+        cid = r["chunk_id"]
+        if cid in merged:
+            merged[cid]["semantic_norm"] = r.get("semantic_norm", 0)
+            merged[cid]["semantic_score"] = r.get("semantic_score", 0)
+        else:
+            merged[cid] = {
+                **r,
+                "keyword_norm": 0,
+                "semantic_norm": r.get("semantic_norm", 0),
+            }
+
+    # Compute combined score
+    total_weight = keyword_weight + semantic_weight
+    if total_weight == 0:
+        total_weight = 1.0
+
+    for item in merged.values():
+        item["score"] = round(
+            (keyword_weight * item["keyword_norm"]
+             + semantic_weight * item["semantic_norm"]) / total_weight,
+            4
+        )
+
+    # Sort by combined score descending, take top_k
+    ranked = sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:top_k]
+
+    # Clean up internal fields
+    for r in ranked:
+        r.pop("keyword_norm", None)
+        r.pop("semantic_norm", None)
+        r.pop("keyword_score", None)
+        r.pop("semantic_score", None)
+
+    return ranked
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -298,7 +558,7 @@ app = FastAPI(
           operation_id="ingest_path")
 async def ep_ingest_path(req: IngestPathRequest):
     """Ingest one file or an entire folder into the knowledge index.
-    Files are chunked and stored for keyword search.
+    Files are chunked, embedded, and stored for hybrid search.
     If a file was previously indexed and hasn't changed (by checksum), it is skipped."""
 
     # Resolve path: allow relative (to KNOWLEDGE_ROOT) or absolute
@@ -320,88 +580,94 @@ async def ep_ingest_path(req: IngestPathRequest):
 
     conn = _get_db()
     results = []
+    t0 = time.monotonic()
     try:
         if target.is_file():
-            results.append(_ingest_single_file(conn, target, req.collection, req.tags))
+            results.append(await _ingest_single_file(conn, target, req.collection, req.tags))
         else:
             glob_pattern = "**/*" if req.recursive else "*"
             for f in sorted(target.glob(glob_pattern)):
                 if f.is_file() and not f.name.startswith("."):
                     results.append(
-                        _ingest_single_file(conn, f, req.collection, req.tags)
+                        await _ingest_single_file(conn, f, req.collection, req.tags)
                     )
         conn.commit()
     finally:
         conn.close()
 
+    elapsed = round(time.monotonic() - t0, 2)
     summary = {}
     for r in results:
         s = r.get("status", "unknown")
         summary[s] = summary.get(s, 0) + 1
 
-    return {"results": results, "summary": summary}
+    logger.info("Ingestion complete: %s in %.2fs", summary, elapsed)
+    return {"results": results, "summary": summary, "elapsed_seconds": elapsed}
 
 
 @app.post("/search_knowledge",
-          summary="Search the knowledge base by keyword or phrase",
+          summary="Search the knowledge base by keyword, meaning, or both",
           operation_id="search_knowledge")
 async def ep_search_knowledge(req: SearchRequest):
-    """Search indexed documents using full-text keyword search (BM25 ranking).
-    Returns the most relevant chunks with source metadata."""
+    """Search indexed documents using hybrid keyword + semantic search.
+    Keyword search uses FTS5 BM25 ranking. Semantic search uses embedding
+    cosine similarity. Results are merged with configurable weights.
+    Falls back to keyword-only if embeddings are unavailable."""
 
     conn = _get_db()
     try:
-        # Build FTS5 query: wrap each word in quotes for safety
-        words = req.query.strip().split()
-        if not words:
-            return {"results": [], "total": 0}
-        fts_query = " OR ".join(f'"{w}"' for w in words)
+        keyword_results = []
+        semantic_results = []
 
-        # Base query with optional filters
-        params: list[Any] = [fts_query]
-        where_extra = ""
+        # Keyword search (always available)
+        if req.keyword_weight > 0:
+            keyword_results = _keyword_search(
+                conn, req.query, req.collection, req.tags,
+                limit=req.top_k * 2  # fetch more to improve merge quality
+            )
 
-        if req.collection:
-            where_extra += " AND s.collection = ?"
-            params.append(req.collection)
+        # Semantic search (if embeddings available)
+        if req.semantic_weight > 0:
+            query_embedding = await embed_text(req.query)
+            if query_embedding:
+                semantic_results = _semantic_search(
+                    conn, query_embedding, req.collection, req.tags,
+                    limit=req.top_k * 2
+                )
+            elif req.keyword_weight == 0:
+                # Semantic-only requested but embeddings unavailable
+                return {"results": [], "total": 0, "query": req.query,
+                        "note": "Semantic search unavailable — embedding model not reachable"}
 
-        if req.tags:
-            for tag in req.tags.split(","):
-                tag = tag.strip()
-                if tag:
-                    where_extra += " AND s.tags LIKE ?"
-                    params.append(f"%{tag}%")
+        # Merge results
+        if keyword_results and semantic_results:
+            results = _merge_results(
+                keyword_results, semantic_results,
+                req.keyword_weight, req.semantic_weight, req.top_k
+            )
+            search_mode = "hybrid"
+        elif keyword_results:
+            # Keyword only — normalize scores
+            for r in keyword_results:
+                r["score"] = round(r.pop("keyword_score", 0), 4)
+            results = keyword_results[:req.top_k]
+            search_mode = "keyword"
+        elif semantic_results:
+            # Semantic only — use cosine similarity as score
+            for r in semantic_results:
+                r["score"] = round(r.pop("semantic_score", 0), 4)
+            results = semantic_results[:req.top_k]
+            search_mode = "semantic"
+        else:
+            results = []
+            search_mode = "none"
 
-        params.append(req.top_k)
-
-        rows = conn.execute(f"""
-            SELECT c.id, c.chunk_index, c.content,
-                   s.path, s.filename, s.collection, s.tags, s.chunk_count,
-                   rank
-            FROM chunks_fts f
-            JOIN chunks c ON c.id = f.rowid
-            JOIN sources s ON s.id = c.source_id
-            WHERE chunks_fts MATCH ?
-            {where_extra}
-            ORDER BY rank
-            LIMIT ?
-        """, params).fetchall()
-
-        results = [
-            {
-                "chunk_id": row["id"],
-                "chunk_index": row["chunk_index"],
-                "total_chunks": row["chunk_count"],
-                "content": row["content"],
-                "source_path": row["path"],
-                "filename": row["filename"],
-                "collection": row["collection"],
-                "tags": row["tags"],
-                "score": round(row["rank"], 4),
-            }
-            for row in rows
-        ]
-        return {"results": results, "total": len(results), "query": req.query}
+        return {
+            "results": results,
+            "total": len(results),
+            "query": req.query,
+            "search_mode": search_mode,
+        }
     finally:
         conn.close()
 
@@ -501,17 +767,29 @@ async def ep_delete_source(req: DeleteSourceRequest):
 
 @app.get("/health")
 async def health():
-    """Health check — verifies DB is accessible and returns basic stats."""
+    """Health check — verifies DB is accessible, embedding model reachable, and returns stats."""
+    result: dict[str, Any] = {"ok": True, "knowledge_root": KNOWLEDGE_ROOT}
     try:
         conn = _get_db()
         src = conn.execute("SELECT COUNT(*) as c FROM sources").fetchone()["c"]
         chk = conn.execute("SELECT COUNT(*) as c FROM chunks").fetchone()["c"]
+        emb = conn.execute(
+            "SELECT COUNT(*) as c FROM chunks WHERE embedding IS NOT NULL"
+        ).fetchone()["c"]
         conn.close()
-        return {
-            "ok": True,
-            "knowledge_root": KNOWLEDGE_ROOT,
+        result.update({
             "indexed_sources": src,
             "indexed_chunks": chk,
-        }
+            "embedded_chunks": emb,
+            "embedding_model": EMBEDDING_MODEL,
+        })
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        result.update({"ok": False, "error": str(e)})
+
+    # Check if embedding model is reachable
+    test_vec = await embed_text("test")
+    result["embedding_available"] = test_vec is not None
+    if test_vec:
+        result["embedding_dimension"] = len(test_vec)
+
+    return result

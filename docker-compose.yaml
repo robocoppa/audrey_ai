@@ -100,7 +100,11 @@ services:
       - KNOWLEDGE_DB=/app/data/knowledge.db
       - CHUNK_SIZE=${CHUNK_SIZE:-3500}
       - CHUNK_OVERLAP=${CHUNK_OVERLAP:-500}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /mnt/user/knowledge:/knowledge:ro
       - knowledge-data:/app/data
