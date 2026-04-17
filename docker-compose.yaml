@@ -33,6 +33,7 @@ services:
       - COMPLEXITY_FORCE_DEEP=${COMPLEXITY_FORCE_DEEP:-true}
       - COMPLEXITY_TOKEN_THRESHOLD=${COMPLEXITY_TOKEN_THRESHOLD:-500}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - TZ=${TZ:-America/Denver}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -54,6 +55,7 @@ services:
       - ./searxng:/etc/searxng:rw
     environment:
       - SEARXNG_BASE_URL=http://localhost:8080
+      - TZ=${TZ:-America/Denver}
     cap_drop: [ALL]
     cap_add: [CHOWN, SETGID, SETUID]
     networks:
@@ -76,6 +78,7 @@ services:
       - TOOLS_MEMORY_DB=/app/data/memory.db
       - TOOLS_SQL_DB=/app/data/local.db
       - TOOLS_PYTHON_TIMEOUT=30
+      - TZ=${TZ:-America/Denver}
     volumes:
       - tools-data:/app/data
       - tools-sandbox:/app/sandbox
@@ -111,6 +114,7 @@ services:
       - INGEST_QUIET_START=${INGEST_QUIET_START:-20}
       - INGEST_QUIET_END=${INGEST_QUIET_END:-7}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - TZ=${TZ:-America/Denver}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

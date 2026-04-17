@@ -877,6 +877,16 @@ async def ep_ingest_path(req: IngestPathRequest):
     Files are chunked, embedded, and stored for hybrid search.
     If a file was previously indexed and hasn't changed (by checksum), it is skipped."""
 
+    if _ingest_status["running"]:
+        return {
+            "error": "A background scan is already running. Wait for it to finish or check /ingest_status.",
+            "phase": _ingest_status["phase"],
+            "progress": {
+                "processed": _ingest_status["processed_files"],
+                "total": _ingest_status["total_files"],
+            },
+        }
+
     # Resolve path: allow relative (to KNOWLEDGE_ROOT) or absolute
     raw = Path(req.path)
     if raw.is_absolute():
