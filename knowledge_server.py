@@ -94,6 +94,36 @@ def _is_ingestible(path: Path) -> bool:
     return path.suffix.lower() in INGESTIBLE_EXTENSIONS
 
 
+def _build_vision_prompt(path: Path) -> str:
+    """Build a context-aware vision prompt based on the file's location."""
+    try:
+        rel = path.relative_to(KNOWLEDGE_ROOT)
+        collection = _infer_collection(str(rel))
+    except ValueError:
+        collection = "general"
+
+    # Use the folder path to give the model domain context
+    parent_dirs = []
+    try:
+        rel = path.relative_to(KNOWLEDGE_ROOT)
+        parent_dirs = [p for p in rel.parent.parts if p != "."]
+    except ValueError:
+        pass
+    context = " > ".join(parent_dirs) if parent_dirs else collection
+
+    if VISION_PROMPT:
+        return f"This image is from the knowledge base under: {context}\n\n{VISION_PROMPT}"
+
+    return (
+        f"This image is from a knowledge base filed under: {context}\n\n"
+        f"Describe this image in detail for a knowledge base. Use the category context "
+        f"to inform your description — identify the specific subject and use domain-appropriate "
+        f"terminology. Note visual details (color, texture, shape, structure, patterns), "
+        f"any labels or text visible, and what this image represents within its domain. "
+        f"Be specific enough that someone could find this image by searching for related terms."
+    )
+
+
 async def caption_image(path: Path) -> str | None:
     """Generate a text caption for an image using a vision LLM via Ollama."""
     if not VISION_ENABLED or _http_session is None:
@@ -101,11 +131,12 @@ async def caption_image(path: Path) -> str | None:
     try:
         image_bytes = path.read_bytes()
         b64 = base64.b64encode(image_bytes).decode("ascii")
+        prompt = _build_vision_prompt(path)
         async with _http_session.post(
             f"{OLLAMA_BASE_URL}/api/generate",
             json={
                 "model": VISION_MODEL,
-                "prompt": VISION_PROMPT,
+                "prompt": prompt,
                 "images": [b64],
                 "stream": False,
             },
