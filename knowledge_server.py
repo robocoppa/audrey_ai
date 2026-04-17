@@ -8,10 +8,13 @@ hybrid search endpoints that Audrey discovers via OpenAPI.
 Run:  uvicorn knowledge_server:app --host 0.0.0.0 --port 8002
 """
 
+import asyncio
+import base64
 import hashlib
 import logging
 import math
 import os
+import re
 import sqlite3
 import struct
 import time
@@ -37,11 +40,37 @@ MAX_RESULT_CHUNKS = int(os.getenv("MAX_RESULT_CHUNKS", "10"))
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+EMBED_CONCURRENCY = int(os.getenv("EMBED_CONCURRENCY", "4"))
+
+VISION_MODEL = os.getenv("VISION_MODEL", "llava:34b")
+VISION_ENABLED = os.getenv("VISION_ENABLED", "true").lower() in ("true", "1", "yes")
+VISION_PROMPT = os.getenv(
+    "VISION_PROMPT",
+    "Describe this image in detail for a knowledge base. Identify the subject "
+    "and its key characteristics. Note visual details (color, texture, shape, "
+    "structure, patterns), any labels or text visible, and what domain or "
+    "category the image belongs to. Be specific enough that someone could find "
+    "this image by searching for related terms.",
+)
+
+AUTO_SCAN = os.getenv("AUTO_SCAN", "true").lower() in ("true", "1", "yes")
+RESCAN_INTERVAL = int(os.getenv("RESCAN_INTERVAL", "1800"))  # seconds, 0 = startup only
 
 # ── Globals ──────────────────────────────────────────────────────────────────
 
 _http_session: aiohttp.ClientSession | None = None
 _embedding_dim: int | None = None  # detected on first embed call
+_bg_task: asyncio.Task | None = None
+_ingest_status: dict[str, Any] = {
+    "running": False,
+    "phase": "idle",
+    "total_files": 0,
+    "processed_files": 0,
+    "current_file": None,
+    "errors": [],
+    "last_scan_at": None,
+    "last_scan_duration": None,
+}
 
 # ── Text extraction ──────────────────────────────────────────────────────────
 
@@ -52,11 +81,54 @@ PLAIN_EXTENSIONS = {
     ".cpp", ".h", ".hpp", ".rb", ".php", ".swift", ".kt",
 }
 
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 
-def extract_text(path: Path) -> str | None:
+INGESTIBLE_EXTENSIONS = PLAIN_EXTENSIONS | {".pdf", ".html", ".htm", ".docx"} | IMAGE_EXTENSIONS
+
+
+def _is_ingestible(path: Path) -> bool:
+    """Check if a file type is supported for ingestion."""
+    return path.suffix.lower() in INGESTIBLE_EXTENSIONS
+
+
+async def caption_image(path: Path) -> str | None:
+    """Generate a text caption for an image using a vision LLM via Ollama."""
+    if not VISION_ENABLED or _http_session is None:
+        return None
+    try:
+        image_bytes = path.read_bytes()
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        async with _http_session.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={
+                "model": VISION_MODEL,
+                "prompt": VISION_PROMPT,
+                "images": [b64],
+                "stream": False,
+            },
+            timeout=aiohttp.ClientTimeout(total=120),
+        ) as resp:
+            if resp.status != 200:
+                logger.warning("Vision caption failed for %s: HTTP %d", path.name, resp.status)
+                return None
+            data = await resp.json()
+            caption = data.get("response", "").strip()
+            if caption:
+                # Prepend filename for searchability
+                return f"[Image: {path.name}]\n\n{caption}"
+            return None
+    except Exception as e:
+        logger.warning("Vision caption error for %s: %s", path.name, e)
+        return None
+
+
+async def extract_text(path: Path) -> str | None:
     """Extract text content from a file. Returns None on failure."""
     suffix = path.suffix.lower()
     try:
+        if suffix in IMAGE_EXTENSIONS:
+            return await caption_image(path)
+
         if suffix in PLAIN_EXTENSIONS:
             return path.read_text(errors="replace")
 
@@ -79,7 +151,6 @@ def extract_text(path: Path) -> str | None:
                     tag.decompose()
                 return soup.get_text(separator="\n", strip=True)
             except ImportError:
-                import re
                 return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
 
         if suffix == ".docx":
@@ -101,12 +172,48 @@ def extract_text(path: Path) -> str | None:
 
 # ── Chunking ─────────────────────────────────────────────────────────────────
 
-def chunk_text(text: str, chunk_size: int = CHUNK_SIZE,
-               overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """Split text into overlapping chunks by character count."""
-    if len(text) <= chunk_size:
-        return [text]
-    chunks = []
+def _split_into_blocks(text: str) -> list[str]:
+    """Split text into structural blocks: headings, paragraphs, code fences."""
+    lines = text.split("\n")
+    blocks: list[str] = []
+    current_block: list[str] = []
+    in_code_fence = False
+
+    for line in lines:
+        if line.strip().startswith("```"):
+            if in_code_fence:
+                current_block.append(line)
+                blocks.append("\n".join(current_block))
+                current_block = []
+                in_code_fence = False
+            else:
+                if current_block:
+                    blocks.append("\n".join(current_block))
+                    current_block = []
+                current_block.append(line)
+                in_code_fence = True
+        elif in_code_fence:
+            current_block.append(line)
+        elif re.match(r"^#{1,6}\s", line):
+            if current_block:
+                blocks.append("\n".join(current_block))
+                current_block = []
+            current_block.append(line)
+        elif line.strip() == "" and current_block:
+            blocks.append("\n".join(current_block))
+            current_block = []
+        else:
+            current_block.append(line)
+
+    if current_block:
+        blocks.append("\n".join(current_block))
+
+    return [b for b in blocks if b.strip()]
+
+
+def _char_split(text: str, chunk_size: int, overlap: int) -> list[str]:
+    """Fallback: split text into overlapping chunks by character count."""
+    chunks: list[str] = []
     start = 0
     while start < len(text):
         end = start + chunk_size
@@ -117,6 +224,38 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE,
             break
         start = end - overlap
     return chunks
+
+
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE,
+               overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """Split text into overlapping chunks, respecting structural boundaries."""
+    if len(text) <= chunk_size:
+        return [text]
+
+    blocks = _split_into_blocks(text)
+    chunks: list[str] = []
+    current = ""
+    overlap_prefix = ""
+
+    for block in blocks:
+        candidate = (current + "\n\n" + block).strip() if current else block
+        if len(candidate) <= chunk_size:
+            current = candidate
+        else:
+            if current.strip():
+                chunks.append(current.strip())
+                overlap_prefix = current[-overlap:] if len(current) > overlap else current
+            if len(block) > chunk_size:
+                sub_chunks = _char_split(block, chunk_size, overlap)
+                chunks.extend(sub_chunks)
+                overlap_prefix = sub_chunks[-1][-overlap:] if sub_chunks else ""
+                current = ""
+            else:
+                current = (overlap_prefix + "\n\n" + block).strip() if overlap_prefix else block
+
+    if current.strip():
+        chunks.append(current.strip())
+    return chunks if chunks else [text]
 
 
 # ── Embeddings ───────────────────────────────────────────────────────────────
@@ -171,13 +310,14 @@ async def embed_text(text: str) -> list[float] | None:
 
 
 async def embed_batch(texts: list[str]) -> list[list[float] | None]:
-    """Embed multiple texts. Calls Ollama once per text (Ollama /api/embed
-    supports single input). Returns list aligned with input."""
-    results = []
-    for text in texts:
-        vec = await embed_text(text)
-        results.append(vec)
-    return results
+    """Embed multiple texts concurrently with bounded parallelism."""
+    semaphore = asyncio.Semaphore(EMBED_CONCURRENCY)
+
+    async def _embed_with_limit(text: str) -> list[float] | None:
+        async with semaphore:
+            return await embed_text(text)
+
+    return list(await asyncio.gather(*[_embed_with_limit(t) for t in texts]))
 
 
 # ── Database ─────────────────────────────────────────────────────────────────
@@ -186,6 +326,7 @@ def _get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(KNOWLEDGE_DB)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -244,8 +385,33 @@ def _init_db():
     except sqlite3.OperationalError:
         logger.info("Migrating DB: adding embedding column to chunks")
         conn.execute("ALTER TABLE chunks ADD COLUMN embedding BLOB")
+    # Migrate: add embed_model column if upgrading from Phase 2
+    try:
+        conn.execute("SELECT embed_model FROM chunks LIMIT 0")
+    except sqlite3.OperationalError:
+        logger.info("Migrating DB: adding embed_model column to chunks")
+        conn.execute("ALTER TABLE chunks ADD COLUMN embed_model TEXT")
     conn.close()
     logger.info("Knowledge DB initialized at %s", KNOWLEDGE_DB)
+
+
+def _mark_stale_embeddings():
+    """Null out embeddings created by a different model so they get re-embedded."""
+    conn = _get_db()
+    stale = conn.execute(
+        "SELECT COUNT(*) as c FROM chunks "
+        "WHERE embedding IS NOT NULL AND (embed_model IS NULL OR embed_model != ?)",
+        (EMBEDDING_MODEL,),
+    ).fetchone()["c"]
+    if stale > 0:
+        logger.info("Marking %d chunks as stale (model changed to %s)", stale, EMBEDDING_MODEL)
+        conn.execute(
+            "UPDATE chunks SET embedding = NULL, embed_model = NULL "
+            "WHERE embedding IS NOT NULL AND (embed_model IS NULL OR embed_model != ?)",
+            (EMBEDDING_MODEL,),
+        )
+        conn.commit()
+    conn.close()
 
 
 def _file_checksum(path: Path) -> str:
@@ -273,6 +439,8 @@ async def _ingest_single_file(conn: sqlite3.Connection, file_path: Path,
         return {"path": str(file_path), "status": "not_found"}
     if not file_path.is_file():
         return {"path": str(file_path), "status": "not_a_file"}
+    if not _is_ingestible(file_path):
+        return {"path": str(file_path), "status": "skipped_unsupported"}
 
     checksum = _file_checksum(file_path)
 
@@ -284,7 +452,7 @@ async def _ingest_single_file(conn: sqlite3.Connection, file_path: Path,
     if row and row["checksum"] == checksum:
         return {"path": str(file_path), "status": "unchanged"}
 
-    text = extract_text(file_path)
+    text = await extract_text(file_path)
     if text is None or not text.strip():
         return {"path": str(file_path), "status": "unsupported_or_empty"}
 
@@ -317,10 +485,12 @@ async def _ingest_single_file(conn: sqlite3.Connection, file_path: Path,
     source_id = cur.lastrowid
 
     conn.executemany(
-        "INSERT INTO chunks (source_id, chunk_index, content, embedding) VALUES (?, ?, ?, ?)",
+        "INSERT INTO chunks (source_id, chunk_index, content, embedding, embed_model) "
+        "VALUES (?, ?, ?, ?, ?)",
         [
             (source_id, i, chunk,
-             _pack_embedding(emb) if emb else None)
+             _pack_embedding(emb) if emb else None,
+             EMBEDDING_MODEL if emb else None)
             for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
         ]
     )
@@ -360,22 +530,115 @@ class GetChunkRequest(BaseModel):
     chunk_id: int = Field(..., description="ID of the chunk to retrieve")
 
 
+# ── Background scan ─────────────────────────────────────────────────────────
+
+async def _background_scan():
+    """Scan KNOWLEDGE_ROOT and ingest new/changed files."""
+    global _ingest_status
+    _ingest_status["running"] = True
+    _ingest_status["phase"] = "scanning"
+    _ingest_status["errors"] = []
+    t0 = time.monotonic()
+
+    try:
+        kr = Path(KNOWLEDGE_ROOT).resolve()
+        all_files = [
+            f for f in sorted(kr.rglob("*"))
+            if f.is_file() and not f.name.startswith(".") and _is_ingestible(f)
+        ]
+        _ingest_status["total_files"] = len(all_files)
+        _ingest_status["processed_files"] = 0
+        _ingest_status["phase"] = "ingesting"
+        logger.info("Background scan: found %d ingestible files", len(all_files))
+
+        conn = _get_db()
+        try:
+            for f in all_files:
+                _ingest_status["current_file"] = str(f)
+                try:
+                    result = await _ingest_single_file(conn, f, None, "")
+                    if result.get("status") == "indexed":
+                        conn.commit()
+                        logger.info("Background indexed: %s (%d chunks)",
+                                    f.name, result.get("chunks", 0))
+                except Exception as e:
+                    _ingest_status["errors"].append({"file": str(f), "error": str(e)})
+                    logger.error("Background ingest error for %s: %s", f, e)
+                _ingest_status["processed_files"] += 1
+                await asyncio.sleep(0)
+
+            # Re-embed chunks with stale/missing embeddings
+            batch_size = 100
+            offset = 0
+            _ingest_status["phase"] = "re_embedding"
+            while True:
+                stale_chunks = conn.execute(
+                    "SELECT c.id, c.content FROM chunks c "
+                    "WHERE c.embedding IS NULL LIMIT ? OFFSET ?",
+                    (batch_size, offset),
+                ).fetchall()
+                if not stale_chunks:
+                    break
+                logger.info("Re-embedding batch of %d stale chunks", len(stale_chunks))
+                for chunk_row in stale_chunks:
+                    vec = await embed_text(chunk_row["content"])
+                    if vec:
+                        conn.execute(
+                            "UPDATE chunks SET embedding = ?, embed_model = ? WHERE id = ?",
+                            (_pack_embedding(vec), EMBEDDING_MODEL, chunk_row["id"]),
+                        )
+                    await asyncio.sleep(0)
+                conn.commit()
+                offset += batch_size
+        finally:
+            conn.close()
+
+    except Exception as e:
+        logger.error("Background scan failed: %s", e)
+        _ingest_status["errors"].append({"file": None, "error": str(e)})
+    finally:
+        elapsed = round(time.monotonic() - t0, 2)
+        _ingest_status["running"] = False
+        _ingest_status["phase"] = "idle"
+        _ingest_status["current_file"] = None
+        _ingest_status["last_scan_at"] = time.time()
+        _ingest_status["last_scan_duration"] = elapsed
+        logger.info("Background scan complete in %.2fs", elapsed)
+
+
+async def _periodic_scan():
+    """Run background scan on startup, then repeat at RESCAN_INTERVAL."""
+    await _background_scan()
+    while RESCAN_INTERVAL > 0:
+        await asyncio.sleep(RESCAN_INTERVAL)
+        await _background_scan()
+
+
 # ── App ──────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _http_session
+    global _http_session, _bg_task
     _init_db()
+    _mark_stale_embeddings()
     _http_session = aiohttp.ClientSession()
     logger.info("Knowledge server ready  root=%s  db=%s  embedding_model=%s",
                 KNOWLEDGE_ROOT, KNOWLEDGE_DB, EMBEDDING_MODEL)
+    if AUTO_SCAN:
+        _bg_task = asyncio.create_task(_periodic_scan())
     yield
+    if _bg_task and not _bg_task.done():
+        _bg_task.cancel()
+        try:
+            await _bg_task
+        except asyncio.CancelledError:
+            pass
     await _http_session.close()
 
 
 app = FastAPI(
     title="Knowledge Server",
-    version="2.0.0",
+    version="3.0.0",
     description="Local document knowledge base with hybrid keyword + semantic search. "
                 "Designed as a tool server for Audrey.",
     lifespan=lifespan,
@@ -587,7 +850,7 @@ async def ep_ingest_path(req: IngestPathRequest):
         else:
             glob_pattern = "**/*" if req.recursive else "*"
             for f in sorted(target.glob(glob_pattern)):
-                if f.is_file() and not f.name.startswith("."):
+                if f.is_file() and not f.name.startswith(".") and _is_ingestible(f):
                     results.append(
                         await _ingest_single_file(conn, f, req.collection, req.tags)
                     )
@@ -793,3 +1056,22 @@ async def health():
         result["embedding_dimension"] = len(test_vec)
 
     return result
+
+
+@app.get("/ingest_status",
+         summary="Check background ingestion status",
+         operation_id="ingest_status")
+async def ep_ingest_status():
+    """Returns the current state of background ingestion."""
+    return {
+        "running": _ingest_status["running"],
+        "phase": _ingest_status["phase"],
+        "progress": {
+            "processed": _ingest_status["processed_files"],
+            "total": _ingest_status["total_files"],
+        },
+        "current_file": _ingest_status["current_file"],
+        "errors": _ingest_status["errors"][-20:],
+        "last_scan_at": _ingest_status["last_scan_at"],
+        "last_scan_duration": _ingest_status["last_scan_duration"],
+    }

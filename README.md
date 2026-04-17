@@ -224,6 +224,12 @@ curl -N http://localhost:8000/v1/chat/completions \
 | `REFLECTION_ENABLED` | `true` | Enable reflection checks |
 | `PLANNING_ENABLED` | `true` | Enable sub-task decomposition |
 | `ESCALATION_ENABLED` | `true` | Enable fast-path escalation |
+| `EMBED_CONCURRENCY` | `4` | Max concurrent Ollama embedding calls per file |
+| `VISION_MODEL` | `llava:34b` | Ollama model used to caption images during knowledge ingestion |
+| `VISION_ENABLED` | `true` | Enable image captioning during knowledge ingestion |
+| `VISION_PROMPT` | *(see below)* | Prompt sent with each image — tune to your knowledge domain |
+| `AUTO_SCAN` | `true` | Auto-scan and ingest knowledge directory on startup |
+| `RESCAN_INTERVAL` | `1800` | Seconds between periodic knowledge rescans (0 = startup only) |
 
 ### `config.yaml`
 
@@ -264,6 +270,7 @@ The current compose files use named Docker volumes for tool data and sandbox sto
 | `GET` | `/v1/models` | List virtual models |
 | `GET` | `/health` | Health check with Ollama, tool, cache, and agentic status |
 | `POST` | `/v1/tools/rediscover` | Re-scan tool servers without restart |
+| `GET` | `/ingest_status` | Knowledge server: background ingestion progress (on port 8002) |
 
 ## Client Usage
 

@@ -102,6 +102,12 @@ services:
       - CHUNK_OVERLAP=${CHUNK_OVERLAP:-500}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+      - EMBED_CONCURRENCY=${EMBED_CONCURRENCY:-4}
+      - VISION_MODEL=${VISION_MODEL:-llava:34b}
+      - VISION_ENABLED=${VISION_ENABLED:-true}
+      - VISION_PROMPT=${VISION_PROMPT:-}
+      - AUTO_SCAN=${AUTO_SCAN:-true}
+      - RESCAN_INTERVAL=${RESCAN_INTERVAL:-1800}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     extra_hosts:
       - "host.docker.internal:host-gateway"

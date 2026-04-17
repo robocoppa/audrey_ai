@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(python3 -m py_compile pipeline.py)",
-      "Bash(python3 -m py_compile config.py ollama.py pipeline.py main.py)"
+      "Bash(python3 -m py_compile config.py ollama.py pipeline.py main.py)",
+      "Bash(python -m py_compile knowledge_server.py)",
+      "Bash(python3 -m py_compile knowledge_server.py)",
+      "Bash(python3 -c ' *)",
+      "Bash(grep -oP '\\\\$\\\\{\\\\K[A-Z_]+' /home/bart/Documents/audrey_ai/docker-compose.yaml)",
+      "Bash(ls -la /home/bart/Documents/audrey_ai/.env*)"
     ]
   }
 }
