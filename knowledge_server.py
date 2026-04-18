@@ -353,15 +353,58 @@ def _get_embed_semaphore() -> asyncio.Semaphore:
     return _embed_semaphore
 
 
+async def _embed_batch_native(texts: list[str]) -> list[list[float] | None]:
+    """Send multiple texts in a single Ollama /api/embed request."""
+    global _embedding_dim
+    if not texts or _http_session is None:
+        return [None] * len(texts)
+    try:
+        async with _http_session.post(
+            f"{OLLAMA_BASE_URL}/api/embed",
+            json={"model": EMBEDDING_MODEL, "input": texts},
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as resp:
+            if resp.status != 200:
+                logger.warning("Batch embedding request failed: %d", resp.status)
+                return [None] * len(texts)
+            data = await resp.json()
+            embeddings = data.get("embeddings", [])
+            if embeddings and _embedding_dim is None:
+                _embedding_dim = len(embeddings[0])
+                logger.info("Embedding dimension detected: %d", _embedding_dim)
+            # Pad with None if Ollama returns fewer than expected
+            result: list[list[float] | None] = list(embeddings)
+            while len(result) < len(texts):
+                result.append(None)
+            return result
+    except Exception as e:
+        logger.warning("Batch embedding failed: %s", e)
+        return [None] * len(texts)
+
+
+EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "20"))
+
+
 async def embed_batch(texts: list[str]) -> list[list[float] | None]:
-    """Embed multiple texts concurrently with bounded parallelism."""
+    """Embed multiple texts using native batching with bounded parallelism.
+
+    Sends up to EMBED_BATCH_SIZE texts per Ollama request, running up to
+    EMBED_CONCURRENCY requests in parallel.
+    """
+    if not texts:
+        return []
     sem = _get_embed_semaphore()
 
-    async def _embed_with_limit(text: str) -> list[float] | None:
-        async with sem:
-            return await embed_text(text)
+    # Split into sub-batches for native batching
+    sub_batches = [texts[i:i + EMBED_BATCH_SIZE] for i in range(0, len(texts), EMBED_BATCH_SIZE)]
 
-    return list(await asyncio.gather(*[_embed_with_limit(t) for t in texts]))
+    async def _batch_with_limit(batch: list[str]) -> list[list[float] | None]:
+        async with sem:
+            return await _embed_batch_native(batch)
+
+    results = await asyncio.gather(*[_batch_with_limit(b) for b in sub_batches])
+    # Flatten
+    return [vec for batch_result in results for vec in batch_result]
 
 
 # ── Database ─────────────────────────────────────────────────────────────────
