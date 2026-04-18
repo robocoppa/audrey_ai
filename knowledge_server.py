@@ -42,7 +42,7 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:1143
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 EMBED_CONCURRENCY = int(os.getenv("EMBED_CONCURRENCY", "4"))
 
-VISION_MODEL = os.getenv("VISION_MODEL", "llava:34b")
+VISION_MODEL = os.getenv("VISION_MODEL", "qwen3-vl:32b")
 VISION_ENABLED = os.getenv("VISION_ENABLED", "true").lower() in ("true", "1", "yes")
 VISION_PROMPT = os.getenv(
     "VISION_PROMPT",
