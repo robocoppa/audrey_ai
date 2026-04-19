@@ -95,7 +95,7 @@ def _is_ingestible(path: Path) -> bool:
 
 
 def _build_vision_prompt(path: Path) -> str:
-    """Build a context-aware vision prompt based on the file's location."""
+    """Build a context-aware vision prompt based on the file's location and name."""
     try:
         rel = path.relative_to(KNOWLEDGE_ROOT)
         collection = _infer_collection(str(rel))
@@ -110,17 +110,27 @@ def _build_vision_prompt(path: Path) -> str:
     except ValueError:
         pass
     context = " > ".join(parent_dirs) if parent_dirs else collection
+    filename = path.name
 
     if VISION_PROMPT:
-        return f"This image is from the knowledge base under: {context}\n\n{VISION_PROMPT}"
+        return (
+            f"Category: {context}\n"
+            f"Filename: {filename}\n\n"
+            f"{VISION_PROMPT}\n\n"
+            f"Use the filename and category as hints if they describe the subject, "
+            f"but verify against what you actually see in the image."
+        )
 
     return (
-        f"This image is from a knowledge base filed under: {context}\n\n"
-        f"Describe this image in detail for a knowledge base. Use the category context "
-        f"to inform your description — identify the specific subject and use domain-appropriate "
-        f"terminology. Note visual details (color, texture, shape, structure, patterns), "
-        f"any labels or text visible, and what this image represents within its domain. "
-        f"Be specific enough that someone could find this image by searching for related terms."
+        f"Category: {context}\n"
+        f"Filename: {filename}\n\n"
+        f"Describe this image in detail for a knowledge base. The filename and category "
+        f"may contain hints about the subject — use them to inform terminology, but base "
+        f"your description on what is actually visible. Identify the specific subject using "
+        f"domain-appropriate terms, note visual details (color, texture, shape, structure, "
+        f"patterns), any labels or text visible, and what this image represents within its "
+        f"domain. Be specific enough that someone could find this image by searching for "
+        f"related terms."
     )
 
 
