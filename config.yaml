@@ -56,13 +56,13 @@ model_registry:
       quality: 8
 
   vl:
-    - name: "kimi-k2.5:cloud"
-      priority: 12
-      speed: 8
-      quality: 10
     - name: "qwen3-vl:32b"
-      priority: 9
-      speed: 6
+      priority: 14
+      speed: 7
+      quality: 10
+    - name: "kimi-k2.5:cloud"
+      priority: 10
+      speed: 8
       quality: 9
     - name: "llava:34b"
       priority: 5
@@ -140,8 +140,8 @@ deep_panel:
 
   vl:
     workers:
-      - "kimi-k2.5:cloud"
       - "qwen3-vl:32b"
+      - "kimi-k2.5:cloud"
       - "llava:34b"
     synthesizer: "qwen3.5:35b-a3b"
     fallback_synthesizer: "glm-5.1:cloud"

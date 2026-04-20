@@ -5,8 +5,10 @@ Builds payloads, sends requests (single-shot and streaming), and provides
 model runners with optional tool-calling support.
 """
 
+import base64
 import json
 import logging
+import re
 import traceback
 from typing import Any, AsyncGenerator
 
@@ -17,6 +19,73 @@ from config import OLLAMA_BASE_URL, TOOL_CAPABLE_MODELS, TOOLS_ENABLED, is_cloud
 from helpers import timeout_for_model
 
 logger = logging.getLogger("audrey.ollama")
+
+
+# ── OpenAI → Ollama multimodal normalizer ────────────────────────────────────
+
+_DATA_URL_RE = re.compile(r"^data:image/[^;]+;base64,(.+)$", re.IGNORECASE)
+
+
+def _extract_b64(image_url: str) -> str | None:
+    """Extract base64 payload from a data URL or fetch-and-encode an http(s) URL.
+
+    Ollama's chat API expects raw base64 strings in the images array.
+    We only handle data: URLs inline; remote URLs are dropped with a warning
+    since fetching is out of scope for this payload builder.
+    """
+    if not isinstance(image_url, str):
+        return None
+    m = _DATA_URL_RE.match(image_url.strip())
+    if m:
+        return m.group(1)
+    if image_url.startswith(("http://", "https://")):
+        logger.warning("Remote image URLs not supported in Ollama payload: %s",
+                       image_url[:80])
+        return None
+    # Assume already-raw base64
+    return image_url
+
+
+def _normalize_messages_for_ollama(
+    msgs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Flatten OpenAI multimodal content lists into Ollama's string+images shape.
+
+    OpenAI sends content as a list of typed parts when images are present:
+        [{"type":"text","text":"..."}, {"type":"image_url","image_url":{"url":"data:..."}}]
+    Ollama expects:
+        {"content": "...", "images": ["<base64>"]}
+    """
+    out: list[dict[str, Any]] = []
+    for m in msgs:
+        content = m.get("content")
+        if not isinstance(content, list):
+            out.append(m)
+            continue
+
+        text_parts: list[str] = []
+        images: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                if isinstance(part, str):
+                    text_parts.append(part)
+                continue
+            ptype = part.get("type")
+            if ptype == "text":
+                text_parts.append(str(part.get("text", "")))
+            elif ptype == "image_url":
+                url_field = part.get("image_url")
+                url = url_field.get("url") if isinstance(url_field, dict) else url_field
+                b64 = _extract_b64(url or "")
+                if b64:
+                    images.append(b64)
+
+        new_msg = {k: v for k, v in m.items() if k != "content"}
+        new_msg["content"] = "\n".join(p for p in text_parts if p)
+        if images:
+            new_msg["images"] = images
+        out.append(new_msg)
+    return out
 
 
 # ── Payload builder ──────────────────────────────────────────────────────────
@@ -37,7 +106,7 @@ def build_ollama_payload(
 ) -> dict[str, Any]:
     p: dict[str, Any] = {
         "model": model,
-        "messages": msgs,
+        "messages": _normalize_messages_for_ollama(msgs),
         "stream": stream,
         "options": {"temperature": temperature},
     }

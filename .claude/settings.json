@@ -7,7 +7,8 @@
       "Bash(python3 -m py_compile knowledge_server.py)",
       "Bash(python3 -c ' *)",
       "Bash(grep -oP '\\\\$\\\\{\\\\K[A-Z_]+' /home/bart/Documents/audrey_ai/docker-compose.yaml)",
-      "Bash(ls -la /home/bart/Documents/audrey_ai/.env*)"
+      "Bash(ls -la /home/bart/Documents/audrey_ai/.env*)",
+      "Bash(python3 -m py_compile ollama.py)"
     ]
   }
 }
