@@ -11,7 +11,11 @@
       "Bash(python3 -m py_compile ollama.py)",
       "Bash(python3 -m py_compile pipeline.py main.py config.py)",
       "Bash(python3 -c \"from helpers import has_vision_content, get_last_user_text; from config import TOOL_SERVER_URLS; print\\('ok'\\)\")",
-      "Bash(CONFIG_PATH=./config.yaml python3 -c \"from helpers import has_vision_content; from config import TOOL_SERVER_URLS, ALL_VIRTUAL_MODELS; print\\(sorted\\(ALL_VIRTUAL_MODELS\\)\\)\")"
+      "Bash(CONFIG_PATH=./config.yaml python3 -c \"from helpers import has_vision_content; from config import TOOL_SERVER_URLS, ALL_VIRTUAL_MODELS; print\\(sorted\\(ALL_VIRTUAL_MODELS\\)\\)\")",
+      "Bash(curl -s http://localhost:11434/api/tags)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('\\\\n'.join\\(m['name'] for m in d.get\\('models',[]\\)\\)\\)\")",
+      "Bash(python3 -m py_compile pipeline.py helpers.py config.py)",
+      "Bash(CONFIG_PATH=./config.yaml python3 -c \"from config import ALL_VIRTUAL_MODELS, DEEP_PANEL_MIXED, DEEP_PANEL_CLOUD, DEEP_PANEL_LOCAL; print\\(sorted\\(ALL_VIRTUAL_MODELS\\)\\); print\\('mixed.math:', DEEP_PANEL_MIXED.get\\('math'\\)\\); print\\('cloud.math:', DEEP_PANEL_CLOUD.get\\('math'\\)\\); print\\('local.math:', DEEP_PANEL_LOCAL.get\\('math'\\)\\)\")"
     ]
   }
 }

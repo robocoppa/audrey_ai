@@ -53,6 +53,18 @@ _WORKER_ERROR_PREFIX = "[WORKER_ERROR]"
 #  Mode helpers (audrey_research, audrey_knowledge)
 # ══════════════════════════════════════════════════════════════════════════════
 
+_MATH_PREAMBLE = (
+    "You are in math mode. For this request:\n"
+    "- Show your work step by step. Do not skip algebraic steps.\n"
+    "- State definitions, assumptions, domain constraints, and units up front.\n"
+    "- Use LaTeX for all math: inline $x$ and display $$...$$. Never use plain ASCII like x^2 when LaTeX is cleaner.\n"
+    "- Verify arithmetic. When you compute a numeric answer, sanity-check it by substitution or an alternative method.\n"
+    "- For proofs, name the technique (induction, contradiction, construction, etc.) and justify each step.\n"
+    "- If the problem is ambiguous, state your interpretation before solving.\n"
+    "- End with the final answer on its own line, boxed: $\\boxed{answer}$."
+)
+
+
 _RESEARCH_PREAMBLE = (
     "You are in research mode. For this request:\n"
     "- Treat it as a structured investigation, not a quick answer.\n"
@@ -323,6 +335,23 @@ async def node_classify(s):
         s["messages"] = _prepend_system(
             s["messages"], _RESEARCH_PREAMBLE,
         )
+        return s
+
+    if requested == "audrey_math":
+        # Force deep math panel, inject rigorous step-by-step preamble.
+        s.update(
+            {
+                "task_type": "math",
+                "confidence": 1.0,
+                "needs_vision": has_vision_content(s["messages"]),
+                "is_code_review": False,
+                "route_reason": "forced:audrey_math",
+            }
+        )
+        s["use_fast_path"] = False
+        s["fast_model"] = ""
+        s["math_mode"] = True
+        s["messages"] = _prepend_system(s["messages"], _MATH_PREAMBLE)
         return s
 
     if requested == "audrey_knowledge":

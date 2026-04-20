@@ -69,6 +69,32 @@ model_registry:
       speed: 4
       quality: 7
 
+  math:
+    - name: "deepseek-v3.2:cloud"
+      priority: 14
+      speed: 9
+      quality: 10
+    - name: "qwen3.5:397b-cloud"
+      priority: 13
+      speed: 8
+      quality: 10
+    - name: "cogito-2.1:671b-cloud"
+      priority: 12
+      speed: 7
+      quality: 10
+    - name: "kimi-k2.5:cloud"
+      priority: 11
+      speed: 8
+      quality: 10
+    - name: "deepseek-r1:32b"
+      priority: 9
+      speed: 4
+      quality: 10
+    - name: "qwen3.5:35b-a3b"
+      priority: 7
+      speed: 6
+      quality: 8
+
   general:
     - name: "qwen3.5:397b-cloud"
       priority: 14
@@ -154,6 +180,15 @@ deep_panel:
     synthesizer: "qwen3.5:35b-a3b"
     fallback_synthesizer: "glm-5.1:cloud"
 
+  math:
+    workers:
+      - "deepseek-v3.2:cloud"
+      - "qwen3.5:397b-cloud"
+      - "cogito-2.1:671b-cloud"
+      - "deepseek-r1:32b"
+    synthesizer: "deepseek-v3.2:cloud"
+    fallback_synthesizer: "qwen3.5:397b-cloud"
+
 # ─── Deep Panel Cloud (all cloud: workers + synthesizer) ───
 deep_panel_cloud:
   code:
@@ -187,6 +222,14 @@ deep_panel_cloud:
     synthesizer: "glm-5.1:cloud"
     fallback_synthesizer: "kimi-k2.5:cloud"
 
+  math:
+    workers:
+      - "deepseek-v3.2:cloud"
+      - "qwen3.5:397b-cloud"
+      - "cogito-2.1:671b-cloud"
+    synthesizer: "deepseek-v3.2:cloud"
+    fallback_synthesizer: "qwen3.5:397b-cloud"
+
 # ─── Deep Panel Local (all local: workers + synthesizer) ───
 deep_panel_local:
   code:
@@ -216,6 +259,13 @@ deep_panel_local:
       - "deepseek-r1:32b"
     synthesizer: "qwen3.5:35b-a3b"
     fallback_synthesizer: "deepseek-r1:32b"
+
+  math:
+    workers:
+      - "deepseek-r1:32b"
+      - "qwen3.5:35b-a3b"
+    synthesizer: "deepseek-r1:32b"
+    fallback_synthesizer: "qwen3.5:35b-a3b"
 
 # ─── Deep Panel Code (local-first mixed profile for audrey_code) ───
 deep_panel_code:

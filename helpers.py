@@ -408,6 +408,21 @@ def role_prompt(
             if "vl" in worker_name or "llava" in worker_name
             else "Clear explanation from visual analysis."
         )
+    elif task_type == "math":
+        # Differentiate worker angles so drafts complement rather than duplicate.
+        wn = worker_name.lower()
+        if "r1" in wn or "cogito" in wn:
+            b = ("Solve rigorously. Prove each step, state the technique used, "
+                 "and verify the final answer by substitution or a second method.")
+        elif "deepseek" in wn:
+            b = ("Solve directly and efficiently. Show the shortest correct "
+                 "derivation with clear intermediate results. Box the final answer.")
+        elif "qwen" in wn:
+            b = ("Explain the approach and reasoning alongside the computation so "
+                 "the student understands the why, not just the what.")
+        else:
+            b = ("Solve step by step. Show all algebra, use LaTeX, verify the "
+                 "final answer.")
     else:
         b = "Clearest, most useful answer."
     return b + _WSF if structured else b
