@@ -44,6 +44,9 @@ EMBED_CONCURRENCY = int(os.getenv("EMBED_CONCURRENCY", "4"))
 
 VISION_MODEL = os.getenv("VISION_MODEL", "qwen3-vl:32b")
 VISION_ENABLED = os.getenv("VISION_ENABLED", "true").lower() in ("true", "1", "yes")
+VISION_MIN_BYTES = int(os.getenv("VISION_MIN_BYTES", "10240"))      # 10 KB — skip icons/sprites
+VISION_MAX_BYTES = int(os.getenv("VISION_MAX_BYTES", "20971520"))   # 20 MB — skip huge scans
+VISION_PARALLEL = int(os.getenv("VISION_PARALLEL", "2"))            # concurrent vision calls
 VISION_PROMPT = os.getenv(
     "VISION_PROMPT",
     "Describe this image in detail for a knowledge base. Identify the subject "
@@ -134,15 +137,34 @@ def _build_vision_prompt(path: Path) -> str:
     )
 
 
+_vision_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_vision_semaphore() -> asyncio.Semaphore:
+    global _vision_semaphore
+    if _vision_semaphore is None:
+        _vision_semaphore = asyncio.Semaphore(max(1, VISION_PARALLEL))
+    return _vision_semaphore
+
+
 async def caption_image(path: Path) -> str | None:
     """Generate a text caption for an image using a vision LLM via Ollama."""
     if not VISION_ENABLED or _http_session is None:
         return None
     try:
+        size = path.stat().st_size
+        if size < VISION_MIN_BYTES:
+            logger.info("Vision skip (too small, %dB): %s", size, path.name)
+            return None
+        if size > VISION_MAX_BYTES:
+            logger.info("Vision skip (too large, %dMB): %s", size // (1024 * 1024), path.name)
+            return None
+
         image_bytes = path.read_bytes()
         b64 = base64.b64encode(image_bytes).decode("ascii")
         prompt = _build_vision_prompt(path)
-        async with _http_session.post(
+        sem = _get_vision_semaphore()
+        async with sem, _http_session.post(
             f"{OLLAMA_BASE_URL}/api/generate",
             json={
                 "model": VISION_MODEL,
@@ -180,7 +202,12 @@ async def extract_text(path: Path) -> str | None:
             try:
                 import PyPDF2
                 reader = PyPDF2.PdfReader(str(path))
-                pages = [pg.extract_text() or "" for pg in reader.pages[:200]]
+                # Tag each page so chunker can prefer page boundaries as splits
+                pages = []
+                for i, pg in enumerate(reader.pages[:200], start=1):
+                    page_text = (pg.extract_text() or "").strip()
+                    if page_text:
+                        pages.append(f"[Page {i}]\n{page_text}")
                 return "\n\n".join(pages)
             except ImportError:
                 logger.warning("PyPDF2 not installed, skipping %s", path)
@@ -602,16 +629,61 @@ class GetChunkRequest(BaseModel):
 
 # ── Background scan ─────────────────────────────────────────────────────────
 
-async def _prepare_file(file_path: Path) -> dict[str, Any] | None:
+_checksum_cache: dict[str, dict[str, Any]] | None = None
+
+
+def _load_checksum_cache(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """Snapshot of {checksum -> source row} for cross-path dedup."""
+    cache: dict[str, dict[str, Any]] = {}
+    for row in conn.execute(
+        "SELECT id, path, checksum, chunk_count, file_size FROM sources"
+    ):
+        cache.setdefault(row["checksum"], {
+            "id": row["id"],
+            "path": row["path"],
+            "chunk_count": row["chunk_count"],
+            "file_size": row["file_size"],
+        })
+    return cache
+
+
+async def _prepare_file(file_path: Path,
+                        dedup_cache: dict[str, dict[str, Any]] | None = None
+                        ) -> dict[str, Any] | None:
     """Extract text and compute embeddings for one file (no DB access).
 
     Returns a dict with everything needed to write to DB, or None if skipped.
+    If a file with the same checksum already exists in dedup_cache, returns
+    a clone marker so the writer can copy chunks instead of re-embedding.
     """
     try:
         if not file_path.exists() or not file_path.is_file():
             return None
         stat = file_path.stat()
         checksum = _file_checksum(file_path)
+
+        # Cross-path dedup: if another file already indexed identical content,
+        # skip extraction + embedding entirely and clone its chunks.
+        if dedup_cache is not None:
+            existing = dedup_cache.get(checksum)
+            if existing and existing["path"] != str(file_path):
+                try:
+                    rel = file_path.relative_to(KNOWLEDGE_ROOT)
+                    rel_str = str(rel)
+                except ValueError:
+                    rel_str = file_path.name
+                coll = _infer_collection(rel_str)
+                logger.info("Dedup: %s matches %s (cloning %d chunks)",
+                            file_path.name, Path(existing["path"]).name,
+                            existing["chunk_count"])
+                return {
+                    "path": file_path,
+                    "checksum": checksum,
+                    "clone_source_id": existing["id"],
+                    "collection": coll,
+                    "file_size": stat.st_size,
+                    "mtime": stat.st_mtime,
+                }
 
         text = await extract_text(file_path)
         if text is None or not text.strip():
@@ -645,8 +717,6 @@ def _write_prepared(conn: sqlite3.Connection, prep: dict[str, Any]) -> dict[str,
     """Write a prepared file result to the DB. Must be called sequentially."""
     file_path = prep["path"]
     checksum = prep["checksum"]
-    chunks = prep["chunks"]
-    embeddings = prep["embeddings"]
 
     row = conn.execute(
         "SELECT id, checksum FROM sources WHERE path = ?",
@@ -660,6 +730,41 @@ def _write_prepared(conn: sqlite3.Connection, prep: dict[str, Any]) -> dict[str,
         conn.execute("DELETE FROM chunks WHERE source_id = ?", (row["id"],))
         conn.execute("DELETE FROM sources WHERE id = ?", (row["id"],))
 
+    # Clone path: copy chunks from another source with identical checksum
+    clone_source_id = prep.get("clone_source_id")
+    if clone_source_id is not None:
+        src_chunks = conn.execute(
+            "SELECT chunk_index, content, embedding, embed_model "
+            "FROM chunks WHERE source_id = ? ORDER BY chunk_index",
+            (clone_source_id,),
+        ).fetchall()
+        if not src_chunks:
+            # Source was deleted between snapshot and write — fall through to skip
+            return {"path": str(file_path), "status": "dedup_source_missing"}
+        cur = conn.execute(
+            """INSERT INTO sources (path, filename, collection, tags, checksum,
+                                    chunk_count, file_size, mtime, indexed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (str(file_path), file_path.name, prep["collection"], "", checksum,
+             len(src_chunks), prep["file_size"], prep["mtime"], time.time())
+        )
+        new_source_id = cur.lastrowid
+        conn.executemany(
+            "INSERT INTO chunks (source_id, chunk_index, content, embedding, embed_model) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(new_source_id, r["chunk_index"], r["content"], r["embedding"], r["embed_model"])
+             for r in src_chunks],
+        )
+        return {
+            "path": str(file_path),
+            "status": "deduped",
+            "collection": prep["collection"],
+            "chunks": len(src_chunks),
+            "cloned_from": clone_source_id,
+        }
+
+    chunks = prep["chunks"]
+    embeddings = prep["embeddings"]
     embedded_count = sum(1 for e in embeddings if e is not None)
     cur = conn.execute(
         """INSERT INTO sources (path, filename, collection, tags, checksum,
@@ -747,10 +852,11 @@ async def _background_scan():
             # Process files concurrently in batches, write to DB sequentially
             _ingest_status["phase"] = "ingesting"
             sem = asyncio.Semaphore(INGEST_CONCURRENCY)
+            dedup_cache = _load_checksum_cache(conn)
 
             async def _prepare_limited(f: Path) -> tuple[Path, dict[str, Any] | None]:
                 async with sem:
-                    result = await _prepare_file(f)
+                    result = await _prepare_file(f, dedup_cache=dedup_cache)
                     return f, result
 
             batch_size = INGEST_CONCURRENCY * 2
@@ -776,10 +882,22 @@ async def _background_scan():
                         continue
                     try:
                         result = _write_prepared(conn, prep)
-                        if result.get("status") == "indexed":
+                        status = result.get("status")
+                        if status in ("indexed", "deduped"):
                             conn.commit()
-                            logger.info("Background indexed: %s (%d chunks)",
-                                        f.name, result.get("chunks", 0))
+                            # Add the freshly-written file to the dedup cache so
+                            # later files in this scan can clone from it too.
+                            dedup_cache.setdefault(prep["checksum"], {
+                                "id": conn.execute(
+                                    "SELECT id FROM sources WHERE path = ?",
+                                    (str(f),),
+                                ).fetchone()["id"],
+                                "path": str(f),
+                                "chunk_count": result.get("chunks", 0),
+                                "file_size": prep["file_size"],
+                            })
+                            logger.info("Background %s: %s (%d chunks)",
+                                        status, f.name, result.get("chunks", 0))
                     except Exception as e:
                         _ingest_status["errors"].append({"file": str(f), "error": str(e)})
                         logger.error("Background ingest error for %s: %s", f, e)
