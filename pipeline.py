@@ -627,6 +627,9 @@ async def node_parallel_generate(s):
 _SYNTH_SYS = """You are a synthesis model. Merge expert drafts into one coherent, comprehensive response.
 Do NOT mention model names, draft numbers, or that multiple sources were consulted.
 Prefer correctness and clarity. Resolve any contradictions by favoring the more detailed answer.
+Preserve concrete identifications from the drafts — if any draft names a specific person,
+place, object, technique, or entity, carry that identification into the final answer rather
+than generalizing it away. Only drop an identification if drafts directly contradict it.
 If drafts reference tool results or web search data, integrate that information naturally.
 If drafts address different sub-tasks of a complex question, combine them into a unified answer.
 Start with a direct answer first, then supporting detail.
@@ -713,12 +716,23 @@ def _is_valid_worker_output(output: dict[str, Any]) -> bool:
     return bool(content.strip()) and not content.startswith(_WORKER_ERROR_PREFIX)
 
 
+_VISION_ONLY_PATTERNS = ("llava", "-vl", ":vl", "vl:", "vision")
+
+
+def _is_vision_only_model(name: str) -> bool:
+    """Vision-specialized models that shouldn't synthesize multi-draft text."""
+    n = name.lower()
+    return any(p in n for p in _VISION_ONLY_PATTERNS)
+
+
 def _local_worker_models_for_synth(s: dict[str, Any]) -> list[str]:
     outputs = s.get("worker_outputs", [])
     available = {
         str(o.get("model", "")).strip()
         for o in outputs
-        if _is_valid_worker_output(o) and not is_cloud_model(str(o.get("model", "")))
+        if _is_valid_worker_output(o)
+        and not is_cloud_model(str(o.get("model", "")))
+        and not _is_vision_only_model(str(o.get("model", "")))
     }
     if not available:
         return []
