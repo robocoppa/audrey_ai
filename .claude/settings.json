@@ -8,7 +8,10 @@
       "Bash(python3 -c ' *)",
       "Bash(grep -oP '\\\\$\\\\{\\\\K[A-Z_]+' /home/bart/Documents/audrey_ai/docker-compose.yaml)",
       "Bash(ls -la /home/bart/Documents/audrey_ai/.env*)",
-      "Bash(python3 -m py_compile ollama.py)"
+      "Bash(python3 -m py_compile ollama.py)",
+      "Bash(python3 -m py_compile pipeline.py main.py config.py)",
+      "Bash(python3 -c \"from helpers import has_vision_content, get_last_user_text; from config import TOOL_SERVER_URLS; print\\('ok'\\)\")",
+      "Bash(CONFIG_PATH=./config.yaml python3 -c \"from helpers import has_vision_content; from config import TOOL_SERVER_URLS, ALL_VIRTUAL_MODELS; print\\(sorted\\(ALL_VIRTUAL_MODELS\\)\\)\")"
     ]
   }
 }

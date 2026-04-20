@@ -156,6 +156,8 @@ ALL_VIRTUAL_MODELS = {
     "audrey_local",
     "audrey_cloud",
     "audrey_code",
+    "audrey_research",
+    "audrey_knowledge",
 }
 
 

@@ -90,6 +90,10 @@ def _log_safe_query(query: str | None) -> str:
 
 
 def _apply_mode_overrides(state_obj: dict[str, Any]) -> dict[str, Any]:
+    # audrey_research implies research mode overrides regardless of what
+    # audrey_mode the client sent.
+    if state_obj.get("requested_model") == "audrey_research":
+        state_obj["audrey_mode"] = "research"
     mode = normalize_audrey_mode(state_obj.get("audrey_mode"))
     state_obj["audrey_mode"] = mode
 

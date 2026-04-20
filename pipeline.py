@@ -7,9 +7,12 @@ worker selection, synthesis routing, and reflection.
 
 import asyncio
 import logging
+import os
 import re
 import traceback
 from typing import Any
+
+import aiohttp
 
 import state
 from agents import adaptive_escalate, plan_sub_tasks, reflect_on_response, run_react_agent
@@ -24,6 +27,7 @@ from config import (
     OLLAMA_LOCAL_UNLOAD_BETWEEN_WORKERS,
     REFLECTION_ENABLED,
     REFLECTION_MAX_RETRIES,
+    TOOL_SERVER_URLS,
     deep_panel_for_model,
     is_cloud_model,
 )
@@ -34,6 +38,7 @@ from helpers import (
     estimate_tokens,
     flatten_messages,
     get_last_user_text,
+    has_vision_content,
     inject_datetime,
     model_call_kwargs,
     role_prompt,
@@ -42,6 +47,101 @@ from ollama import run_model_once, run_model_with_tools_detailed
 
 logger = logging.getLogger("audrey.pipeline")
 _WORKER_ERROR_PREFIX = "[WORKER_ERROR]"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Mode helpers (audrey_research, audrey_knowledge)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_RESEARCH_PREAMBLE = (
+    "You are in research mode. For this request:\n"
+    "- Treat it as a structured investigation, not a quick answer.\n"
+    "- Use web_search and other tools liberally to gather current evidence.\n"
+    "- Resolve any relative dates (today, this year) to absolute values before searching.\n"
+    "- Cite sources inline with the URL or title, and prefer primary sources.\n"
+    "- Cover multiple angles and call out tradeoffs / dissenting views.\n"
+    "- End with a concise summary and, when applicable, a recommendation."
+)
+
+
+def _build_knowledge_preamble(chunks: list[dict[str, Any]]) -> str:
+    if not chunks:
+        return (
+            "You are in knowledge mode but no matching documents were found in "
+            "the local knowledge base. Tell the user clearly that nothing in "
+            "the indexed corpus matched, then offer to answer from general "
+            "knowledge if they want."
+        )
+    excerpts = []
+    for i, ch in enumerate(chunks, 1):
+        fname = ch.get("filename") or ch.get("source_path", "source")
+        coll = ch.get("collection", "") or ""
+        content = (ch.get("content") or "").strip()
+        header = f"[{i}] {fname}" + (f" ({coll})" if coll else "")
+        excerpts.append(f"{header}\n{content}")
+    body = "\n\n".join(excerpts)
+    return (
+        "You are in knowledge mode. Ground your answer in the retrieved excerpts below. "
+        "Cite sources inline using the [N] markers that label each excerpt. "
+        "If the excerpts do not answer the question, say so — do NOT fabricate details. "
+        "Prefer quoting or paraphrasing the excerpts over inventing information.\n\n"
+        "Retrieved excerpts:\n\n" + body
+    )
+
+
+def _knowledge_server_url() -> str | None:
+    for url in TOOL_SERVER_URLS:
+        if "knowledge" in url:
+            return url.rstrip("/")
+    return None
+
+
+async def _fetch_knowledge_context(
+    query: str, top_k: int = 6
+) -> list[dict[str, Any]]:
+    """Query the knowledge server's /search_knowledge endpoint."""
+    base = _knowledge_server_url()
+    if not base:
+        logger.warning("audrey_knowledge: no knowledge-server URL configured")
+        return []
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.post(
+                f"{base}/search_knowledge",
+                json={"query": query, "top_k": top_k},
+            ) as r:
+                if r.status != 200:
+                    logger.warning(
+                        "knowledge search failed: HTTP %d", r.status
+                    )
+                    return []
+                data = await r.json()
+                return data.get("results") or []
+    except Exception as e:
+        logger.warning("knowledge search error: %s", e)
+        return []
+
+
+def _prepend_system(
+    msgs: list[dict[str, Any]], preamble: str
+) -> list[dict[str, Any]]:
+    """Prepend or extend the leading system message with a mode preamble."""
+    if msgs and msgs[0].get("role") == "system":
+        head = msgs[0]
+        existing = head.get("content", "")
+        if isinstance(existing, list):
+            # Rare: multimodal system — just prepend a text part
+            return [
+                {**head, "content": [{"type": "text", "text": preamble}, *existing]},
+                *msgs[1:],
+            ]
+        combined = (preamble + "\n\n" + (existing or "")).strip()
+        return [{**head, "content": combined}, *msgs[1:]]
+    return [{"role": "system", "content": preamble}, *msgs]
+
+
+
 _AUDREY_CODE_REVIEW_HINT_RE = re.compile(
     r"\b(review|code review|audit|assess|assessment|evaluate|evaluation|critique|"
     r"feedback|improve|improvement|recommendation|recommendations|any issues|"
@@ -203,6 +303,48 @@ async def node_classify(s):
         )
         s["use_fast_path"] = False
         s["fast_model"] = ""
+        return s
+
+    if requested == "audrey_research":
+        # Force deep panel + reasoning task type, inject research-focused prompt
+        # and bump ReAct rounds so workers dig deeper with web search.
+        s.update(
+            {
+                "task_type": "reasoning",
+                "confidence": 1.0,
+                "needs_vision": has_vision_content(s["messages"]),
+                "is_code_review": False,
+                "route_reason": "forced:audrey_research",
+            }
+        )
+        s["use_fast_path"] = False
+        s["fast_model"] = ""
+        s["research_mode"] = True
+        s["messages"] = _prepend_system(
+            s["messages"], _RESEARCH_PREAMBLE,
+        )
+        return s
+
+    if requested == "audrey_knowledge":
+        # Force deep panel + pre-fetch knowledge chunks, inject as context
+        # so synthesis has retrieved material to cite from.
+        s.update(
+            {
+                "task_type": "general",
+                "confidence": 1.0,
+                "needs_vision": has_vision_content(s["messages"]),
+                "is_code_review": False,
+                "route_reason": "forced:audrey_knowledge",
+            }
+        )
+        s["use_fast_path"] = False
+        s["fast_model"] = ""
+        s["knowledge_mode"] = True
+        query = get_last_user_text(s["messages"])
+        chunks = await _fetch_knowledge_context(query) if query else []
+        s["knowledge_chunks"] = chunks
+        preamble = _build_knowledge_preamble(chunks)
+        s["messages"] = _prepend_system(s["messages"], preamble)
         return s
 
     s.update(await classify_request(s["messages"]))
