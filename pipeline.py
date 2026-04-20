@@ -234,7 +234,12 @@ async def node_classify(s):
         return s
 
     if FAST_PATH_ENABLED and requested == "audrey_deep":
-        if s["confidence"] >= confidence_threshold:
+        if s.get("needs_vision"):
+            # Deep should synthesize across multiple vision workers when
+            # the user uploads an image — skip the fast-path shortcut.
+            s["route_reason"] += " → forced_deep:vision"
+            logger.info("Forcing deep panel: image upload on audrey_deep")
+        elif s["confidence"] >= confidence_threshold:
             fm = select_fast_model(s["task_type"])
             if fm:
                 # ── Complexity gate ──────────────────────────────────
