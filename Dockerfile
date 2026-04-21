@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy all source modules
 COPY config.py state.py models.py helpers.py health.py cache.py \
      ollama.py search.py classifier.py agents.py pipeline.py \
-     streaming.py main.py tool_registry.py ./
+     streaming.py main.py tool_registry.py slash_commands.py ./
 
 # Copy config
 COPY config.yaml .
