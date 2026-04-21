@@ -26,25 +26,25 @@ from typing import Any
 
 SLASH_COMMANDS: dict[str, dict[str, Any]] = {
     # ── Source priority ─────────────────────────────────────────────────
-    "/web":      {"flags": {"source_priority": "web_primary", "force_web_search": True}},
-    "/kb":       {"flags": {"source_priority": "kb_primary",  "force_kb": True}},
-    "/both":     {"flags": {"source_priority": "both",        "force_web_search": True, "force_kb": True}},
+    "!web":      {"flags": {"source_priority": "web_primary", "force_web_search": True}},
+    "!kb":       {"flags": {"source_priority": "kb_primary",  "force_kb": True}},
+    "!both":     {"flags": {"source_priority": "both",        "force_web_search": True, "force_kb": True}},
 
     # ── Source disable ──────────────────────────────────────────────────
-    "/nosearch": {"flags": {"disable_web_search": True}},
-    "/noweb":    {"flags": {"disable_web_search": True}},
-    "/nokb":     {"flags": {"disable_kb": True}},
+    "!nosearch": {"flags": {"disable_web_search": True}},
+    "!noweb":    {"flags": {"disable_web_search": True}},
+    "!nokb":     {"flags": {"disable_kb": True}},
 
     # ── Tool nudges ─────────────────────────────────────────────────────
-    "/remember": {"flags": {}, "tool_hint": "memory_store", "description": "Save a fact to memory"},
-    "/recall":   {"flags": {}, "tool_hint": "memory_search", "description": "Search saved memories"},
-    "/py":       {"flags": {}, "tool_hint": "run_python", "description": "Run Python code"},
-    "/python":   {"flags": {}, "tool_hint": "run_python"},
-    "/sql":      {"flags": {}, "tool_hint": "sql_query", "description": "Run a SQL query"},
-    "/read":     {"flags": {}, "tool_hint": "read_file", "description": "Read a workspace file"},
-    "/fetch":    {"flags": {"force_web_search": False}, "tool_hint": "fetch_url", "description": "Fetch and summarize a URL"},
-    "/stats":    {"flags": {}, "tool_hint": "system_stats", "description": "Server health and GPU stats"},
-    "/sources":  {"flags": {}, "tool_hint": "list_sources", "description": "List indexed knowledge-base docs"},
+    "!remember": {"flags": {}, "tool_hint": "memory_store", "description": "Save a fact to memory"},
+    "!recall":   {"flags": {}, "tool_hint": "memory_search", "description": "Search saved memories"},
+    "!py":       {"flags": {}, "tool_hint": "run_python", "description": "Run Python code"},
+    "!python":   {"flags": {}, "tool_hint": "run_python"},
+    "!sql":      {"flags": {}, "tool_hint": "sql_query", "description": "Run a SQL query"},
+    "!read":     {"flags": {}, "tool_hint": "read_file", "description": "Read a workspace file"},
+    "!fetch":    {"flags": {"force_web_search": False}, "tool_hint": "fetch_url", "description": "Fetch and summarize a URL"},
+    "!stats":    {"flags": {}, "tool_hint": "system_stats", "description": "Server health and GPU stats"},
+    "!sources":  {"flags": {}, "tool_hint": "list_sources", "description": "List indexed knowledge-base docs"},
 }
 
 
@@ -140,10 +140,10 @@ def _get_last_user_text_and_set(
 
 
 def _parse_slash(text: str) -> tuple[str | None, str]:
-    """Return (command, remaining_text) if the prompt starts with a known slash
-    command, otherwise (None, text)."""
+    """Return (command, remaining_text) if the prompt starts with a known bang
+    command (``!cmd``), otherwise (None, text)."""
     stripped = text.lstrip()
-    if not stripped.startswith("/"):
+    if not stripped.startswith("!"):
         return None, text
     # Command = first whitespace-delimited token, lowercased.
     head, _, rest = stripped.partition(" ")

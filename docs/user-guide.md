@@ -34,29 +34,33 @@ Set the mode in OpenWebUI's mode selector.
 
 ---
 
-## 3. Slash commands
+## 3. Bang commands
 
 Type one of these as the **first word** of your prompt. Audrey strips it and
 applies the command to just that turn.
+
+> **Why `!` and not `/`?** OpenWebUI intercepts any message starting with
+> `/` as one of its own built-in slash commands and never forwards it to
+> Audrey. Using `!` sidesteps that.
 
 ### Source priority
 
 | Command | What it does |
 |---|---|
-| `/web` | Web is primary. KB still available as secondary. |
-| `/kb` | Knowledge base is primary. Web still available as secondary. |
-| `/both` | Query both; reconcile findings. |
-| `/nosearch` or `/noweb` | Disable web entirely for this turn. |
-| `/nokb` | Disable knowledge base entirely for this turn. |
+| `!web` | Web is primary. KB still available as secondary. |
+| `!kb` | Knowledge base is primary. Web still available as secondary. |
+| `!both` | Query both; reconcile findings. |
+| `!nosearch` or `!noweb` | Disable web entirely for this turn. |
+| `!nokb` | Disable knowledge base entirely for this turn. |
 
 **Examples**
 
 ```
-/web what's the current Bitcoin price?
-/kb what do our engineering docs say about deployment?
-/both audit our retention policy against industry best practice
-/nosearch explain how consensus algorithms work
-/nokb just answer from general knowledge — what's a B-tree?
+!web what's the current Bitcoin price?
+!kb what do our engineering docs say about deployment?
+!both audit our retention policy against industry best practice
+!nosearch explain how consensus algorithms work
+!nokb just answer from general knowledge — what's a B-tree?
 ```
 
 ### Tool triggers
@@ -66,15 +70,15 @@ isn't needed, it can still ignore the hint.
 
 | Command | Tool | Example |
 |---|---|---|
-| `/remember <text>` | memory_store | `/remember my laptop has 2x 3090 Ti` |
-| `/recall <query>` | memory_search | `/recall GPU setup` |
-| `/py <code>` | run_python | `/py print(sum(range(100)))` |
-| `/python <code>` | run_python | (alias of `/py`) |
-| `/sql <query>` | sql_query | `/sql SELECT * FROM memories LIMIT 5` |
-| `/read <path>` | read_file | `/read notes/meeting.md` |
-| `/fetch <url>` | fetch_url | `/fetch https://example.com/article` |
-| `/stats` | system_stats | `/stats` |
-| `/sources` | list_sources | `/sources` |
+| `!remember <text>` | memory_store | `!remember my laptop has 2x 3090 Ti` |
+| `!recall <query>` | memory_search | `!recall GPU setup` |
+| `!py <code>` | run_python | `!py print(sum(range(100)))` |
+| `!python <code>` | run_python | (alias of `!py`) |
+| `!sql <query>` | sql_query | `!sql SELECT * FROM memories LIMIT 5` |
+| `!read <path>` | read_file | `!read notes/meeting.md` |
+| `!fetch <url>` | fetch_url | `!fetch https://example.com/article` |
+| `!stats` | system_stats | `!stats` |
+| `!sources` | list_sources | `!sources` |
 
 ---
 
@@ -174,7 +178,7 @@ Everything stacks. A few recipes:
 
 **Quick factual lookup, web only**
 - Model: `audrey_fast`
-- Prompt: `/web current Champions League winner`
+- Prompt: `!web current Champions League winner`
 
 **Knowledge-grounded policy question**
 - Model: `audrey_knowledge`
@@ -182,19 +186,19 @@ Everything stacks. A few recipes:
 
 **Code review without web noise**
 - Model: `audrey_code`
-- Prompt: `/nosearch review this function for thread-safety issues`
+- Prompt: `!nosearch review this function for thread-safety issues`
 
 **Run some quick math in Python**
 - Model: `audrey_deep`
-- Prompt: `/py import math; print(math.factorial(20))`
+- Prompt: `!py import math; print(math.factorial(20))`
 
 **Summarize a web page**
 - Model: `audrey_deep`
-- Prompt: `/fetch https://example.com/long-article tl;dr?`
+- Prompt: `!fetch https://example.com/long-article tl;dr?`
 
 **Ask both sources, get a reconciled answer**
 - Model: `audrey_deep`
-- Prompt: `/both how should we set our Postgres `work_mem`?`
+- Prompt: `` !both how should we set our Postgres `work_mem`? ``
 
 ---
 
@@ -211,19 +215,20 @@ Everything stacks. A few recipes:
 ## 8. Troubleshooting
 
 **"Audrey searched the web when I didn't want her to"**
-Prepend `/nosearch` or add "don't search the web" to your prompt.
+Prepend `!nosearch` or add "don't search the web" to your prompt.
 
 **"Audrey didn't search the web when I needed her to"**
-Prepend `/web` or phrase the question with time-sensitive keywords
+Prepend `!web` or phrase the question with time-sensitive keywords
 ("latest", "current", "2025...").
 
 **"Audrey ignored my knowledge base"**
-Switch the model to `audrey_knowledge`, or prepend `/kb`.
+Switch the model to `audrey_knowledge`, or prepend `!kb`.
 
 **"I want to force a specific tool"**
-Use the matching slash command — e.g. `/py` for code execution, `/sql` for
-database queries, `/fetch` for URL summarization.
+Use the matching bang command — e.g. `!py` for code execution, `!sql` for
+database queries, `!fetch` for URL summarization.
 
-**"The slash command didn't work"**
-Make sure it's the very first token of the message. `hey /web what's up`
-won't trigger, `/web what's up` will.
+**"The command didn't work / I got 'Unknown command'"**
+If your prompt started with `/`, OpenWebUI ate it before Audrey saw it.
+Use `!` instead. Also make sure the command is the very first token:
+`hey !web what's up` won't trigger, `!web what's up` will.
