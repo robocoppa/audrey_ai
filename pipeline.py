@@ -135,6 +135,15 @@ async def _fetch_knowledge_context(
         return []
 
 
+def _maybe_prepend_tool_hint(s: dict[str, Any]) -> list[dict[str, Any]]:
+    """Prepend a short system nudge when the user invoked a tool-specific
+    slash command (e.g. /py, /read). Leaves messages untouched otherwise."""
+    hint = s.get("tool_hint_preamble", "")
+    if not hint:
+        return s["messages"]
+    return _prepend_system(s["messages"], hint)
+
+
 def _prepend_system(
     msgs: list[dict[str, Any]], preamble: str
 ) -> list[dict[str, Any]]:
@@ -315,6 +324,7 @@ async def node_classify(s):
         )
         s["use_fast_path"] = False
         s["fast_model"] = ""
+        s["messages"] = _maybe_prepend_tool_hint(s)
         return s
 
     if requested == "audrey_research":
@@ -335,6 +345,7 @@ async def node_classify(s):
         s["messages"] = _prepend_system(
             s["messages"], _RESEARCH_PREAMBLE,
         )
+        s["messages"] = _maybe_prepend_tool_hint(s)
         return s
 
     if requested == "audrey_math":
@@ -352,9 +363,10 @@ async def node_classify(s):
         s["fast_model"] = ""
         s["math_mode"] = True
         s["messages"] = _prepend_system(s["messages"], _MATH_PREAMBLE)
+        s["messages"] = _maybe_prepend_tool_hint(s)
         return s
 
-    if requested == "audrey_knowledge":
+    if requested == "audrey_knowledge" and not s.get("disable_kb"):
         # Force deep panel + pre-fetch knowledge chunks, inject as context
         # so synthesis has retrieved material to cite from.
         s.update(
@@ -374,9 +386,20 @@ async def node_classify(s):
         s["knowledge_chunks"] = chunks
         preamble = _build_knowledge_preamble(chunks)
         s["messages"] = _prepend_system(s["messages"], preamble)
+        s["messages"] = _maybe_prepend_tool_hint(s)
         return s
 
     s.update(await classify_request(s["messages"]))
+
+    # Per-turn user overrides: /kb (force_kb) fetches KB context even when
+    # the selected model isn't audrey_knowledge. Does not force the deep
+    # panel — fast path can still run if the classifier picked it.
+    if s.get("force_kb") and not s.get("disable_kb") and not s.get("knowledge_mode"):
+        query = get_last_user_text(s["messages"])
+        chunks = await _fetch_knowledge_context(query) if query else []
+        s["knowledge_chunks"] = chunks
+        s["knowledge_mode"] = True
+        s["messages"] = _prepend_system(s["messages"], _build_knowledge_preamble(chunks))
 
     # Default: no fast path
     s["use_fast_path"] = False
@@ -386,6 +409,7 @@ async def node_classify(s):
     if requested == "audrey_fast":
         if not FAST_PATH_ENABLED:
             s["route_reason"] += " → fast_only:disabled"
+            s["messages"] = _maybe_prepend_tool_hint(s)
             return s
         fm = select_fast_model(s["task_type"])
         if fm:
@@ -394,6 +418,7 @@ async def node_classify(s):
             s["route_reason"] += f" → fast_only:{fm}"
         else:
             s["route_reason"] += " → fast_only:no_healthy_model"
+        s["messages"] = _maybe_prepend_tool_hint(s)
         return s
 
     # "audrey_deep" tries fast path when confidence is high enough
@@ -402,6 +427,7 @@ async def node_classify(s):
     )
     if requested == "audrey_deep" and s.get("force_deep_profile"):
         s["route_reason"] += " → mode:research_force_deep"
+        s["messages"] = _maybe_prepend_tool_hint(s)
         return s
 
     if FAST_PATH_ENABLED and requested == "audrey_deep":
@@ -430,6 +456,7 @@ async def node_classify(s):
                     s["fast_model"] = fm
                     s["route_reason"] += f" → fast:{fm}"
 
+    s["messages"] = _maybe_prepend_tool_hint(s)
     return s
 
 
@@ -544,6 +571,8 @@ async def node_parallel_generate(s):
                 run_model_with_tools_detailed(
                     wn,
                     [sys, *base],
+                    disable_web_search=bool(s.get("disable_web_search")),
+                    disable_kb=bool(s.get("disable_kb")),
                     **call_kwargs,
                 ),
                 timeout=DEEP_WORKER_TIMEOUT,

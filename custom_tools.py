@@ -95,6 +95,10 @@ class PythonRunRequest(BaseModel):
 class DocumentReadRequest(BaseModel):
     path: str
 
+class UrlFetchRequest(BaseModel):
+    url: str
+    max_chars: int = 20000
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  1 — Web Search  (SearXNG)
@@ -380,7 +384,73 @@ async def ep_list_files(req: FileListRequest):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  7 — SQL Query  (local SQLite)
+#  7 — URL Fetcher
+# ══════════════════════════════════════════════════════════════════════════════
+
+_URL_ALLOWED_SCHEMES = {"http", "https"}
+_URL_MAX_BYTES = int(os.getenv("TOOLS_URL_MAX_BYTES", "2000000"))
+_URL_FETCH_TIMEOUT = int(os.getenv("TOOLS_URL_FETCH_TIMEOUT", "15"))
+
+
+@app.post("/fetch_url", summary="Fetch a URL and return its text content",
+          operation_id="fetch_url")
+async def ep_fetch_url(req: UrlFetchRequest):
+    """Download a URL and extract readable text. HTML is stripped to text."""
+    from urllib.parse import urlparse
+    parsed = urlparse(req.url.strip())
+    if parsed.scheme not in _URL_ALLOWED_SCHEMES:
+        return {"error": f"Only http/https allowed, got {parsed.scheme!r}"}
+    if not parsed.netloc:
+        return {"error": "Missing host"}
+
+    try:
+        async with _http_session.get(
+            req.url,
+            timeout=aiohttp.ClientTimeout(total=_URL_FETCH_TIMEOUT),
+            allow_redirects=True,
+        ) as resp:
+            if resp.status != 200:
+                return {"error": f"HTTP {resp.status}", "url": req.url}
+            ctype = resp.headers.get("Content-Type", "").lower()
+            raw = await resp.content.read(_URL_MAX_BYTES + 1)
+            truncated = len(raw) > _URL_MAX_BYTES
+            if truncated:
+                raw = raw[:_URL_MAX_BYTES]
+            try:
+                body = raw.decode(resp.charset or "utf-8", errors="replace")
+            except (LookupError, TypeError):
+                body = raw.decode("utf-8", errors="replace")
+    except Exception as e:
+        return {"error": str(e), "url": req.url}
+
+    content: str
+    if "html" in ctype or body.lstrip().startswith("<"):
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(body, "html.parser")
+            for tag in soup(["script", "style", "noscript"]):
+                tag.decompose()
+            title = (soup.title.string.strip() if soup.title and soup.title.string else "")
+            text = soup.get_text(separator="\n", strip=True)
+            content = (f"# {title}\n\n{text}" if title else text)
+        except ImportError:
+            import re as _re
+            content = _re.sub(r"\s+", " ", _re.sub(r"<[^>]+>", " ", body)).strip()
+    else:
+        content = body
+
+    max_chars = max(1, min(req.max_chars, 200000))
+    clipped = content[:max_chars]
+    return {
+        "url": str(resp.url),
+        "content_type": ctype,
+        "content": clipped,
+        "truncated": truncated or len(content) > max_chars,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  8 — SQL Query  (local SQLite)
 # ══════════════════════════════════════════════════════════════════════════════
 
 SQL_DB = os.getenv("TOOLS_SQL_DB", "/app/data/local.db")

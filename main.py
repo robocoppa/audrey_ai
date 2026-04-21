@@ -57,6 +57,7 @@ from helpers import (
     normalize_audrey_mode,
 )
 from models import ChatCompletionRequest
+from slash_commands import apply_slash_commands
 from pipeline import (
     node_adaptive_escalate,
     node_classify,
@@ -660,6 +661,7 @@ async def rediscover_tools():
 def _build_request_state(req, *, request_id: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build initial state and cache kwargs from a request. Shared by both paths."""
     msgs_raw = [m.model_dump() for m in req.messages]
+    slash_flags = apply_slash_commands(msgs_raw)
     temp = req.temperature if req.temperature is not None else DEFAULT_TEMPERATURE
     mode = normalize_audrey_mode(getattr(req, "audrey_mode", "balanced"))
     cache_kwargs = dict(
@@ -684,6 +686,17 @@ def _build_request_state(req, *, request_id: str | None = None) -> tuple[dict[st
     )
     _apply_mode_overrides(s)
     s["needs_fresh_data"] = is_time_sensitive_query(get_last_user_text(msgs_raw))
+    # User-facing slash commands / natural-language source triggers.
+    s["source_priority"] = slash_flags.get("source_priority", "")
+    s["force_web_search"] = bool(slash_flags.get("force_web_search", False))
+    s["force_kb"] = bool(slash_flags.get("force_kb", False))
+    s["disable_web_search"] = bool(slash_flags.get("disable_web_search", False))
+    s["disable_kb"] = bool(slash_flags.get("disable_kb", False))
+    s["tool_hint"] = slash_flags.get("tool_hint", "")
+    s["tool_hint_preamble"] = slash_flags.get("tool_hint_preamble", "")
+    s["slash_command"] = slash_flags.get("slash_command", "")
+    if s["force_web_search"]:
+        s["needs_fresh_data"] = True  # bypass cache when user forces a fresh web lookup
     return s, cache_kwargs
 
 
@@ -713,6 +726,10 @@ def _log_completion(r: dict[str, Any], *, path: str) -> None:
         "path": path,
         "ms": r.get("latency_ms"),
     }
+    if r.get("slash_command"):
+        log_entry["slash"] = r["slash_command"]
+    if r.get("source_priority"):
+        log_entry["source_priority"] = r["source_priority"]
     if path in ("fast+react", "fast-only"):
         log_entry["react_rounds"] = r.get("react_rounds", 0)
         log_entry["search"] = r.get("search_performed", False)

@@ -255,6 +255,8 @@ async def run_model_with_tools(
     presence_penalty: float | None = None,
     max_tool_rounds: int | None = None,
     keep_alive: Any | None = None,
+    disable_web_search: bool = False,
+    disable_kb: bool = False,
 ) -> str:
     content, _ = await run_model_with_tools_detailed(
         model,
@@ -267,6 +269,8 @@ async def run_model_with_tools(
         presence_penalty=presence_penalty,
         max_tool_rounds=max_tool_rounds,
         keep_alive=keep_alive,
+        disable_web_search=disable_web_search,
+        disable_kb=disable_kb,
     )
     return content
 
@@ -283,6 +287,8 @@ async def run_model_with_tools_detailed(
     presence_penalty: float | None = None,
     max_tool_rounds: int | None = None,
     keep_alive: Any | None = None,
+    disable_web_search: bool = False,
+    disable_kb: bool = False,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run a model with tool-calling support via the tool registry.
 
@@ -311,6 +317,18 @@ async def run_model_with_tools_detailed(
         return content, []
 
     tool_defs = state.tool_registry.tool_definitions
+    if disable_web_search or disable_kb:
+        _web_suf = ("__web_search",)
+        _kb_suf = ("__search_knowledge", "__get_chunk", "__list_sources")
+        filtered: list[dict[str, Any]] = []
+        for t in tool_defs:
+            name = str(t.get("function", {}).get("name", ""))
+            if disable_web_search and any(name.endswith(s) for s in _web_suf):
+                continue
+            if disable_kb and any(name.endswith(s) for s in _kb_suf):
+                continue
+            filtered.append(t)
+        tool_defs = filtered
 
     async def chat_fn(current_msgs):
         return await ollama_chat_once(

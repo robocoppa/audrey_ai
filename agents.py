@@ -41,6 +41,36 @@ from ollama import ollama_chat_once, run_model_once, run_model_with_tools
 logger = logging.getLogger("audrey.agents")
 
 
+# ── Tool filtering for user source overrides (slash commands / NL triggers) ──
+
+_WEB_SEARCH_SUFFIXES = ("__web_search",)
+_KB_TOOL_SUFFIXES = ("__search_knowledge", "__get_chunk", "__list_sources")
+
+
+def _tool_name(t: dict[str, Any]) -> str:
+    return str(t.get("function", {}).get("name", ""))
+
+
+def _filter_tools_for_request(
+    tool_defs: list[dict[str, Any]], s: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Remove web-search or KB tools when the user has disabled them for
+    this turn. Other tools pass through unchanged."""
+    disable_web = bool(s.get("disable_web_search"))
+    disable_kb = bool(s.get("disable_kb"))
+    if not (disable_web or disable_kb):
+        return tool_defs
+    filtered: list[dict[str, Any]] = []
+    for t in tool_defs:
+        name = _tool_name(t)
+        if disable_web and any(name.endswith(suf) for suf in _WEB_SEARCH_SUFFIXES):
+            continue
+        if disable_kb and any(name.endswith(suf) for suf in _KB_TOOL_SUFFIXES):
+            continue
+        filtered.append(t)
+    return filtered
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Planning — decomposes complex queries for deep workers
 # ══════════════════════════════════════════════════════════════════════════════
@@ -282,7 +312,9 @@ async def run_react_agent(s: dict[str, Any]) -> dict[str, Any]:
         )
 
         if model_can_use_tools:
-            tool_defs = state.tool_registry.tool_definitions
+            tool_defs = _filter_tools_for_request(
+                state.tool_registry.tool_definitions, s
+            )
             max_rounds = s.get("react_max_rounds_override")
             if max_rounds is None:
                 max_rounds = REACT_MAX_ROUNDS

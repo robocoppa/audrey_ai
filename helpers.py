@@ -70,6 +70,15 @@ def ensure_state_defaults(state: dict[str, Any]) -> dict[str, Any]:
     state.setdefault("reflection_enabled_override", None)
     state.setdefault("reflection_max_retries_override", None)
     state.setdefault("react_max_rounds_override", None)
+    # Slash commands / natural-language source triggers.
+    state.setdefault("source_priority", "")
+    state.setdefault("force_web_search", False)
+    state.setdefault("force_kb", False)
+    state.setdefault("disable_web_search", False)
+    state.setdefault("disable_kb", False)
+    state.setdefault("tool_hint", "")
+    state.setdefault("tool_hint_preamble", "")
+    state.setdefault("slash_command", "")
     return state
 
 
