@@ -5,9 +5,12 @@ Builds payloads, sends requests (single-shot and streaming), and provides
 model runners with optional tool-calling support.
 """
 
+import asyncio
 import base64
+import io
 import json
 import logging
+import os
 import re
 import traceback
 from typing import Any, AsyncGenerator
@@ -19,6 +22,65 @@ from config import OLLAMA_BASE_URL, TOOL_CAPABLE_MODELS, TOOLS_ENABLED, is_cloud
 from helpers import timeout_for_model
 
 logger = logging.getLogger("audrey.ollama")
+
+try:
+    from PIL import Image
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PIL_AVAILABLE = False
+    logger.warning("Pillow not installed — image downscaling disabled")
+
+_IMG_MAX_EDGE = int(os.getenv("AUDREY_IMG_MAX_EDGE", "1024"))
+_IMG_JPEG_QUALITY = int(os.getenv("AUDREY_IMG_JPEG_QUALITY", "85"))
+_IMG_DOWNSCALE_THRESHOLD_BYTES = int(os.getenv("AUDREY_IMG_DOWNSCALE_THRESHOLD", "300000"))
+
+
+def _maybe_downscale_b64(b64: str) -> str:
+    if not _PIL_AVAILABLE or not b64:
+        return b64
+    try:
+        raw = base64.b64decode(b64, validate=False)
+    except Exception:
+        return b64
+    if len(raw) < _IMG_DOWNSCALE_THRESHOLD_BYTES:
+        return b64
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            img.load()
+            w, h = img.size
+            long_edge = max(w, h)
+            if long_edge <= _IMG_MAX_EDGE and img.format in ("JPEG", "JPG"):
+                return b64
+            scale = min(1.0, _IMG_MAX_EDGE / long_edge)
+            new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            if scale < 1.0:
+                img = img.resize(new_size, Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=_IMG_JPEG_QUALITY, optimize=True)
+            out = base64.b64encode(buf.getvalue()).decode("ascii")
+            logger.info(
+                "Downscaled image %dx%d (%d B) → %dx%d (%d B)",
+                w, h, len(raw), new_size[0], new_size[1], len(buf.getvalue()),
+            )
+            return out
+    except Exception as e:
+        logger.warning("Image downscale failed, passing through: %s", e)
+        return b64
+
+
+_LOAD_RACE_RETRIES = 4
+_LOAD_RACE_BACKOFF_S = (2.0, 5.0, 10.0, 20.0)
+
+
+def _is_load_race_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return (
+        "connection refused" in msg
+        or "model is loading" in msg
+        or "model not ready" in msg
+    )
 
 
 # ── OpenAI → Ollama multimodal normalizer ────────────────────────────────────
@@ -60,6 +122,9 @@ def _normalize_messages_for_ollama(
     for m in msgs:
         content = m.get("content")
         if not isinstance(content, list):
+            existing_images = m.get("images")
+            if isinstance(existing_images, list) and existing_images:
+                m = {**m, "images": [_maybe_downscale_b64(str(b)) for b in existing_images]}
             out.append(m)
             continue
 
@@ -78,7 +143,7 @@ def _normalize_messages_for_ollama(
                 url = url_field.get("url") if isinstance(url_field, dict) else url_field
                 b64 = _extract_b64(url or "")
                 if b64:
-                    images.append(b64)
+                    images.append(_maybe_downscale_b64(b64))
 
         new_msg = {k: v for k, v in m.items() if k != "content"}
         new_msg["content"] = "\n".join(p for p in text_parts if p)
@@ -163,10 +228,28 @@ async def ollama_chat_once(
                 raise RuntimeError(f"Ollama {r.status}: {await r.text()}")
             return await r.json()
 
+    async def _do_with_retry():
+        last: Exception | None = None
+        for attempt in range(_LOAD_RACE_RETRIES + 1):
+            try:
+                return await _do()
+            except Exception as e:
+                if attempt >= _LOAD_RACE_RETRIES or not _is_load_race_error(e):
+                    raise
+                delay = _LOAD_RACE_BACKOFF_S[min(attempt, len(_LOAD_RACE_BACKOFF_S) - 1)]
+                logger.warning(
+                    "Ollama load-race for %s (attempt %d/%d): %s — retrying in %.1fs",
+                    model, attempt + 1, _LOAD_RACE_RETRIES + 1, e, delay,
+                )
+                await asyncio.sleep(delay)
+                last = e
+        assert last is not None
+        raise last
+
     if is_cloud_model(model):
-        return await _do()
+        return await _do_with_retry()
     async with state.gpu_semaphore:
-        return await _do()
+        return await _do_with_retry()
 
 
 # ── Streaming chat ───────────────────────────────────────────────────────────
