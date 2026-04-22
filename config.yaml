@@ -4,7 +4,7 @@
 #
 # Removed: llama4:latest (67GB, can't coexist), gemma4:31b (redundant),
 #          qwen2.5-coder:32b (covered by qwen3-coder-next),
-#          qwen3-vl:32b (llava:34b + kimi-k2.6:cloud cover VL),
+#          qwen3-vl:32b (llava:34b + kimi-k2.5:cloud cover VL),
 #          deepseek-coder-v2:16b (redundant, lowest-priority code worker),
 #          olmo-3.1:32b (lowest quality local model, no unique role)
 model_registry:
@@ -38,7 +38,7 @@ model_registry:
       priority: 12
       speed: 9
       quality: 10
-    - name: "kimi-k2.6:cloud"
+    - name: "kimi-k2.5:cloud"
       priority: 11
       speed: 8
       quality: 10
@@ -60,7 +60,7 @@ model_registry:
       priority: 14
       speed: 7
       quality: 10
-    - name: "kimi-k2.6:cloud"
+    - name: "kimi-k2.5:cloud"
       priority: 10
       speed: 8
       quality: 9
@@ -82,7 +82,7 @@ model_registry:
       priority: 12
       speed: 7
       quality: 10
-    - name: "kimi-k2.6:cloud"
+    - name: "kimi-k2.5:cloud"
       priority: 11
       speed: 8
       quality: 10
@@ -139,7 +139,7 @@ fast_path:
     # Cloud models
     - "qwen3.5:397b-cloud"
     - "deepseek-v3.2:cloud"
-    - "kimi-k2.6:cloud"
+    - "kimi-k2.5:cloud"
     - "glm-5.1:cloud"
     - "cogito-2.1:671b-cloud"
     - "nemotron-3-super:cloud"
@@ -167,7 +167,7 @@ deep_panel:
   vl:
     workers:
       - "qwen3-vl:32b"
-      - "kimi-k2.6:cloud"
+      - "kimi-k2.5:cloud"
       - "llava:34b"
     synthesizer: "qwen3.6:35b"
     fallback_synthesizer: "glm-5.1:cloud"
@@ -195,7 +195,7 @@ deep_panel_cloud:
     workers:
       - "qwen3.5:397b-cloud"
       - "deepseek-v3.2:cloud"
-      - "kimi-k2.6:cloud"
+      - "kimi-k2.5:cloud"
     synthesizer: "cogito-2.1:671b-cloud"
     fallback_synthesizer: "glm-5.1:cloud"
 
@@ -209,7 +209,7 @@ deep_panel_cloud:
 
   vl:
     workers:
-      - "kimi-k2.6:cloud"
+      - "kimi-k2.5:cloud"
       - "qwen3.5:397b-cloud"
     synthesizer: "glm-5.1:cloud"
     fallback_synthesizer: "deepseek-v3.2:cloud"
@@ -220,7 +220,7 @@ deep_panel_cloud:
       - "deepseek-v3.2:cloud"
       - "nemotron-3-super:cloud"
     synthesizer: "glm-5.1:cloud"
-    fallback_synthesizer: "kimi-k2.6:cloud"
+    fallback_synthesizer: "kimi-k2.5:cloud"
 
   math:
     workers:
